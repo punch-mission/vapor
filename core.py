@@ -1,11 +1,48 @@
 import warnings
 import numpy as np
 
-import numpy as np
-
 def radial_position_ps(tB, pB, dist_image_plane, dist_obs_to_source):
     """
     Polarization-ratio line-of-sight localization (point-source approximation).
+
+    This routine takes total and polarized brightness in each image pixel and,
+    under the point-source approximation for the Sun, inverts the polarization
+    ratio to recover where along the line of sight the scattering feature could
+    be located.
+
+    There are two geometric solutions for each pixel:
+
+    - The **foreground** (+) solution: feature between the Sun and the observer.
+    - The **background** (–) solution: feature on the far side of the Sun,
+      behind the plane of the sky, but still along the same line of sight.
+
+    Distances and angles are defined as follows:
+
+    - `r_plus`, `r_minus`  (Sun → feature):
+        Heliocentric radial distance of the scattering point from the **Sun**
+        for the foreground (+) and background (–) solutions.
+
+    - `l_plus`, `l_minus`  (observer → feature):
+        Line-of-sight distance from the **observer** to the scattering point
+        along the ray corresponding to each pixel, for the + and – solutions.
+        `l = 0` at the observer; `l ≈ dist_obs_to_source` near the Sun.
+
+    - `tau_plus`, `tau_minus`  (angle along the LOS from the Thomson surface):
+        LOS angle measured from the Thomson surface (where the scattering angle
+        χ = 90°) toward the feature:
+            * τ > 0 : in front of the Thomson surface (towards the observer),
+            * τ < 0 : behind the Thomson surface (away from the observer).
+
+    - `x_plus`, `x_minus`  (distance from the plane of the sky):
+        Signed distance of the scattering point from the **plane of the sky**
+        (POS) along the Sun–observer axis:
+            * x = 0   : point lies in the POS,
+            * x > 0   : point in front of the POS (towards the observer),
+            * x < 0   : point behind the POS (far side of the Sun).
+
+    All distance outputs (`r_*`, `l_*`, `x_*`) are returned in the same units
+    as `dist_image_plane` and `dist_obs_to_source` (e.g. km or R_sun). Angles
+    (`epsilon`, `chi_*`, `xi_*`, `tau_*`) are in radians.
 
     Parameters
     ----------
@@ -16,25 +53,31 @@ def radial_position_ps(tB, pB, dist_image_plane, dist_obs_to_source):
     dist_image_plane : array_like
         Projected distance from Sun centre in the image plane for each pixel
         (impact parameter r_pos, same shape as tB), in the same units as
-        dist_obs_to_source (e.g. R_sun or km).
+        `dist_obs_to_source` (e.g. km or R_sun).
     dist_obs_to_source : float
-        Distance from observer to the Sun (e.g. 215 R_sun for 1 AU).
+        Distance from observer to the Sun (e.g. 1 AU in km, or ~215 R_sun).
 
     Returns
     -------
     r_plus, r_minus : ndarray
-        Heliocentric radial distances of the foreground (+) and background (-)
-        solutions, same shape as tB.
+        Heliocentric radial distance from the Sun to the scattering point for
+        the foreground (+) and background (–) solutions.
     l_plus, l_minus : ndarray
-        Line-of-sight distances from the observer to the feature (foreground
-        and background).
+        Line-of-sight distance from the observer to the scattering point for
+        the foreground (+) and background (–) solutions.
     tau_plus, tau_minus : ndarray
-        LOS angles from the Thomson surface for the + and - solutions.
+        LOS angles (in radians) from the Thomson surface for the + and –
+        solutions.
     x_plus, x_minus : ndarray
-        Distance from the plane of the sky along the Sun–observer axis for the
-        + and - solutions (x = 0 at the POS; x > 0 in front of the POS).
+        Signed distance from the plane of the sky along the Sun–observer axis
+        for the + and – solutions.
 
-    Invalid pixels are returned as np.nan.
+    Notes
+    -----
+    - Inputs and outputs must be in consistent length units (km with km, or
+      R_sun with R_sun).
+    - Pixels with unphysical polarization (p < 0 or p > 1) or numerically
+      invalid PR are returned as NaN in all outputs.
     """
 
     # Cast and check shapes
