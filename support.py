@@ -2,121 +2,9 @@ import numpy as np
 import matplotlib.pyplot as plt
 import warnings
 
-from scipy import signal
 from astropy.io import fits
 from typing import Iterable, Tuple, Optional
-from astropy import constants as c
-from astropy import units as u
-
-def gauss_kern(size: int, size_y: int | None = None) -> np.ndarray:
-    """
-    Generate a normalized 2D Gaussian kernel for convolution.
-
-    Parameters
-    ----------
-    size : int
-        The half-size of the kernel in the x-direction. The full kernel
-        will span from -size to +size.
-    size_y : int, optional
-        The half-size in the y-direction. If None, it defaults to `size`.
-
-    Returns
-    -------
-    numpy.ndarray
-        A 2D Gaussian kernel normalized so that its sum equals 1.
-
-    Notes
-    -----
-    The kernel uses a Gaussian of the form:
-        exp(-(x^2 / size^2 + y^2 / size_y^2))
-    where `size` and `size_y` act as scale parameters, not standard deviations.
-    """
-    size = int(size)
-    size_y = int(size_y) if size_y is not None else size
-
-    x, y = np.mgrid[-size:size+1, -size_y:size_y+1]
-    g = np.exp(-(x**2 / float(size)**2 + y**2 / float(size_y)**2))
-
-    return g / g.sum()
-
-
-def blur_image(image: np.ndarray, n: int, n_y: int | None = None) -> np.ndarray:
-    """
-    Blur an image by convolving it with a 2D Gaussian kernel.
-
-    Parameters
-    ----------
-    image : numpy.ndarray
-        The 2D input image array to be blurred.
-    n : int
-        The Gaussian kernel half-size in the x-direction.
-    n_y : int, optional
-        The Gaussian kernel half-size in the y-direction. If None, it defaults to `n`.
-
-    Returns
-    -------
-    numpy.ndarray
-        The blurred image, computed using `scipy.signal.convolve`
-        with `mode='valid'`.
-
-    Notes
-    -----
-    The output will be smaller than the input by `n` (and `n_y`) pixels
-    on each side because `mode='valid'` is used.
-    """
-    kernel = gauss_kern(n, size_y=n_y)
-    blurred = signal.convolve(image, kernel, mode="valid")
-    return blurred
-
-
-def open_fits(filepath):
-    """
-    Load a FITS file and display the primary HDU image using matplotlib.
-    """
-    # Open FITS file
-    with fits.open(filepath) as hdul:
-        data = hdul[0].data
-        header = hdul[0].header
-    
-    if data is None:
-        raise ValueError("No image data found in primary HDU.")
-    
-    return data
-
-
-def generate_square_test_pattern(size=256, square_size=32):
-    """
-    Generate a 2D test array containing non-overlapping squares of increasing values.
-
-    Parameters
-    ----------
-    size : int
-        Size of the full image (size x size).
-    square_size : int
-        Size of each square.
-
-    Returns
-    -------
-    numpy.ndarray
-        A 2D array with square patterns.
-    """
-    data = np.zeros((size, size), dtype=float)
-    value = 1
-
-    # Number of squares along each dimension
-    n = size // square_size
-
-    for i in range(n):
-        for j in range(n):
-            y0 = i * square_size
-            y1 = y0 + square_size
-            x0 = j * square_size
-            x1 = x0 + square_size
-            data[y0:y1, x0:x1] = value
-            value += 1
-
-    return data
-
+from astropy import units as u, constants as c
 
 def _read_fits_image(path: str) -> Tuple[np.ndarray, fits.Header]:
     """Read primary HDU image + header from a FITS file."""
@@ -130,127 +18,6 @@ def _read_fits_image(path: str) -> Tuple[np.ndarray, fits.Header]:
                 raise ValueError(f"No image data found in FITS file: {path}")
             hdu = img_hdus[0]
         return np.array(hdu.data), hdu.header
-
-
-def import_data(
-    file_list: Iterable[str],
-    data_type: Optional[str] = None,
-    use_mask: bool = True,
-    use_cdelt: bool = True,
-    subtract_base_image: bool = False,
-    base_file_list: Optional[Iterable[str]] = None,
-    bad_pixel_value: Optional[int] = -8888,
-) -> Tuple[np.ndarray, np.ndarray, fits.Header, fits.Header]:
-    """
-    Load, optionally mask, and optionally base-difference a total-brightness (tB)
-    and polarized-brightness (pB) FITS pair.
-
-    Parameters
-    ----------
-    file_list : iterable of str
-        List/tuple of exactly two FITS file paths:
-        [tB_path, pB_path].
-    data_type : {'forward', None}, optional
-        If 'forward', replace pixels equal to `bad_pixel_value` with NaN.
-    use_mask : bool, default True
-        If True, multiply each image by a mask derived from its file via
-        `build_mask(path)`. Assumes `build_mask` returns a numeric mask with
-        the same shape as the image.
-    use_cdelt : bool, default True
-        Placeholder for future pixel-scale handling. Currently **not used**;
-        a warning is issued if True.
-    subtract_base_image : bool, default False
-        If True, subtract base images (tB_base, pB_base) before returning.
-    base_file_list : iterable of str, optional
-        List/tuple of exactly two FITS file paths for base images:
-        [tB_base_path, pB_base_path]. Required if `subtract_base_image=True`.
-    bad_pixel_value : int or None, optional
-        Value used to mark bad pixels (default -8888). If `None`, no replacement
-        is performed even if `data_type='forward'`.
-
-    Returns
-    -------
-    tB_data : ndarray
-        Total brightness image (possibly masked and/or base-differenced).
-    pB_data : ndarray
-        Polarized brightness image (possibly masked and/or base-differenced).
-    tB_header : astropy.io.fits.Header
-        Header associated with the returned tB image.
-    pB_header : astropy.io.fits.Header
-        Header associated with the returned pB image.
-    """
-    file_list = list(file_list)
-    if len(file_list) != 2:
-        raise ValueError("file_list must contain exactly two paths: [tB_path, pB_path].")
-
-    if use_cdelt:
-        warnings.warn(
-            "'use_cdelt' is currently not implemented and is ignored.",
-            RuntimeWarning,
-            stacklevel=2,
-        )
-
-    # Load primary images
-    tB_data, tB_header = _read_fits_image(file_list[0])
-    pB_data, pB_header = _read_fits_image(file_list[1])
-
-    # Optional masks
-    if use_mask:
-        try:
-            tB_mask = build_mask(file_list[0])
-            pB_mask = build_mask(file_list[1])
-            if tB_mask.shape != tB_data.shape:
-                raise ValueError("tB mask shape does not match tB image shape.")
-            if pB_mask.shape != pB_data.shape:
-                raise ValueError("pB mask shape does not match pB image shape.")
-            tB_data = tB_data * tB_mask
-            pB_data = pB_data * pB_mask
-        except NameError:
-            warnings.warn("build_mask is not defined; skipping masking.",
-                          RuntimeWarning, stacklevel=2)
-
-    # Optional bad-pixel replacement
-    if data_type == "forward" and bad_pixel_value is not None:
-        if not np.issubdtype(tB_data.dtype, np.floating):
-            tB_data = tB_data.astype(float, copy=False)
-        if not np.issubdtype(pB_data.dtype, np.floating):
-            pB_data = pB_data.astype(float, copy=False)
-
-        tB_data[tB_data == bad_pixel_value] = np.nan
-        pB_data[pB_data == bad_pixel_value] = np.nan
-
-    # Optional base differencing
-    if subtract_base_image:
-        if base_file_list is None:
-            warnings.warn(
-                "subtract_base_image=True but no base_file_list provided; skipping base subtraction.",
-                RuntimeWarning,
-                stacklevel=2,
-            )
-        else:
-            base_file_list = list(base_file_list)
-            if len(base_file_list) != 2:
-                raise ValueError("base_file_list must contain exactly two paths.")
-
-            base_tB, _ = _read_fits_image(base_file_list[0])
-            base_pB, _ = _read_fits_image(base_file_list[1])
-
-            if use_mask:
-                try:
-                    base_tB = base_tB * tB_mask
-                    base_pB = base_pB * pB_mask
-                except NameError:
-                    pass
-
-            if base_tB.shape != tB_data.shape:
-                raise ValueError("Base tB image shape does not match tB image shape.")
-            if base_pB.shape != pB_data.shape:
-                raise ValueError("Base pB image shape does not match pB image shape.")
-
-            tB_data = tB_data - base_tB
-            pB_data = pB_data - base_pB
-
-    return tB_data, pB_data, tB_header, pB_header
 
 
 
@@ -422,13 +189,183 @@ def build_mask(
 
     return mask
 
-def create_distance_map(file_list, 
-                        data_type=None, 
-                        use_mask=1, 
-                        use_cdelt=0,
-                        subtract_base_image=0,
-                        base_file_list=None):
-    # Load one image + header (we only need geometry here)
+
+def import_data(
+    file_list: Iterable[str],
+    data_type: Optional[str] = None,
+    use_mask: bool = True,
+    use_cdelt: bool = False,
+    subtract_base_image: bool = False,
+    base_file_list: Optional[Iterable[str]] = None,
+    bad_pixel_value: Optional[int] = -8888,
+) -> Tuple[np.ndarray, np.ndarray, fits.Header, fits.Header]:
+    """
+    Load, optionally mask, and optionally base-difference a total-brightness (tB)
+    and polarized-brightness (pB) FITS pair.
+
+    Parameters
+    ----------
+    file_list : iterable of str
+        List/tuple of exactly two FITS file paths:
+        [tB_path, pB_path].
+    data_type : {'forward', None}, optional
+        If 'forward', replace pixels equal to `bad_pixel_value` with NaN.
+    use_mask : bool, default True
+        If True, multiply each image by a mask derived from its file via
+        `build_mask(path)`. Assumes `build_mask` returns a numeric mask with
+        the same shape as the image.
+    use_cdelt : bool, default True
+        Placeholder for future pixel-scale handling. Currently **not used**;
+        a warning is issued if True.
+    subtract_base_image : bool, default False
+        If True, subtract base images (tB_base, pB_base) before returning.
+    base_file_list : iterable of str, optional
+        List/tuple of exactly two FITS file paths for base images:
+        [tB_base_path, pB_base_path]. Required if `subtract_base_image=True`.
+    bad_pixel_value : int or None, optional
+        Value used to mark bad pixels (default -8888). If `None`, no replacement
+        is performed even if `data_type='forward'`.
+
+    Returns
+    -------
+    tB_data : ndarray
+        Total brightness image (possibly masked and/or base-differenced).
+    pB_data : ndarray
+        Polarized brightness image (possibly masked and/or base-differenced).
+    tB_header : astropy.io.fits.Header
+        Header associated with the returned tB image.
+    pB_header : astropy.io.fits.Header
+        Header associated with the returned pB image.
+    """
+    file_list = list(file_list)
+    if len(file_list) != 2:
+        raise ValueError("file_list must contain exactly two paths: [tB_path, pB_path].")
+
+    if use_cdelt:
+        warnings.warn(
+            "'use_cdelt' is currently not implemented and is ignored.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+
+    # Load primary images
+    tB_data, tB_header = _read_fits_image(file_list[0])
+    pB_data, pB_header = _read_fits_image(file_list[1])
+
+    # Optional masks
+    if use_mask:
+        try:
+            tB_mask = build_mask(file_list[0])
+            pB_mask = build_mask(file_list[1])
+            if tB_mask.shape != tB_data.shape:
+                raise ValueError("tB mask shape does not match tB image shape.")
+            if pB_mask.shape != pB_data.shape:
+                raise ValueError("pB mask shape does not match pB image shape.")
+            tB_data = tB_data * tB_mask
+            pB_data = pB_data * pB_mask
+        except NameError:
+            warnings.warn("build_mask is not defined; skipping masking.",
+                          RuntimeWarning, stacklevel=2)
+
+    # Optional bad-pixel replacement
+    if data_type == "forward" and bad_pixel_value is not None:
+        if not np.issubdtype(tB_data.dtype, np.floating):
+            tB_data = tB_data.astype(float, copy=False)
+        if not np.issubdtype(pB_data.dtype, np.floating):
+            pB_data = pB_data.astype(float, copy=False)
+
+        tB_data[tB_data == bad_pixel_value] = np.nan
+        pB_data[pB_data == bad_pixel_value] = np.nan
+
+    # Optional base differencing
+    if subtract_base_image:
+        if base_file_list is None:
+            warnings.warn(
+                "subtract_base_image=True but no base_file_list provided; skipping base subtraction.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+        else:
+            base_file_list = list(base_file_list)
+            if len(base_file_list) != 2:
+                raise ValueError("base_file_list must contain exactly two paths.")
+
+            base_tB, _ = _read_fits_image(base_file_list[0])
+            base_pB, _ = _read_fits_image(base_file_list[1])
+
+            if use_mask:
+                try:
+                    base_tB = base_tB * tB_mask
+                    base_pB = base_pB * pB_mask
+                except NameError:
+                    pass
+
+            if base_tB.shape != tB_data.shape:
+                raise ValueError("Base tB image shape does not match tB image shape.")
+            if base_pB.shape != pB_data.shape:
+                raise ValueError("Base pB image shape does not match pB image shape.")
+
+            tB_data = tB_data - base_tB
+            pB_data = pB_data - base_pB
+
+    return tB_data, pB_data, tB_header, pB_header
+
+
+def create_distance_map(
+    file_list: Iterable[str],
+    data_type: Optional[str] = None,
+    use_mask: bool = True,
+    use_cdelt: bool = False,
+    subtract_base_image: bool = False,
+    base_file_list: Optional[Iterable[str]] = None,
+) -> np.ndarray:
+    """
+    Create a 2D map of image-plane distances from Sun centre for each pixel.
+
+    This function computes the projected distance from the Sun centre in the
+    image plane (the impact parameter r_pos) for each pixel in the pB image.
+    Distances are returned in kilometres and are suitable for direct use as
+    `dist_image_plane` in `radial_position_ps`.
+
+    Geometry is derived either from the FITS WCS (using CDELT/CRPIX/RSUN)
+    or from a simple assumed field-of-view in solar radii.
+
+    Parameters
+    ----------
+    file_list : list or sequence
+        Input file list passed to `import_data`. Only the geometry from the
+        first pB image is used.
+    data_type : str, optional
+        Passed directly to `import_data`. Used here only for the special case
+        'noise_gate_data' when computing pixel scales.
+    use_mask : int or bool, optional
+        Passed through to `import_data`. Not used directly in this function.
+    use_cdelt : int or bool, optional
+        If non-zero, use FITS header keywords (CRPIX*, CDELT*, RSUN) to
+        determine the pixel scale in km. If zero, assume a fixed field-of-view
+        of 64 R_sun across the image.
+    subtract_base_image : int or bool, optional
+        Passed through to `import_data`. Not used directly here.
+    base_file_list : list or sequence, optional
+        Passed through to `import_data`. Not used directly here.
+
+    Returns
+    -------
+    spatial_plane_distance : ndarray
+        2D array of shape (ny, nx) giving the projected distance from the
+        Sun centre in the image plane for each pixel, in kilometres.
+
+    Notes
+    -----
+    - When `use_cdelt` is True, this assumes:
+        * `CRPIX1`, `CRPIX2` give the Sun centre in 1-based pixel coordinates.
+        * `CDELT1`, `CDELT2` are in units consistent with `RSUN` such that
+          `solar_radii_in_km * CDELT / RSUN` gives km per pixel.
+    - When `use_cdelt` is False, a symmetric field-of-view of 64 R_sun
+      across the image width is assumed.
+    """
+
+    # 1. Load one image and header via import_data (we only need geometry)
     tB_data, pB_data, tB_hdr, pB_hdr = import_data(
         file_list,
         data_type=data_type,
@@ -438,139 +375,52 @@ def create_distance_map(file_list,
         base_file_list=base_file_list,
     )
 
-    # calculate constants
-    solar_radii=c.R_sun
-    solar_radii_in_km=solar_radii.to(u.kilometer)
-    solar_radii_in_km=solar_radii_in_km.value
+    # Solar radius in km (constant)
+    solar_radii_in_km = c.R_sun.to(u.kilometer).value
 
-    sun_obs_dist = c.au# * u.kilometer   # km
-    sun_obs_dist=sun_obs_dist.to(u.kilometer)
-    sun_obs_dist=sun_obs_dist.value
-
-    sun_obs_dist_rs=sun_obs_dist/solar_radii_in_km
-
-    # Allocate
+    # Allocate output array: same shape as pB image
     spatial_plane_distance = np.zeros_like(pB_data, dtype=float)
 
-    # Geometry
+    # Image dimensions (assume pB_data has shape [ny, nx])
+    ny, nx = spatial_plane_distance.shape
+
+    # 2. Determine pixel scale and Sun-centre position
     if use_cdelt:
-        # FITS is 1-based; Python is 0-based
-        x_center = pB_hdr['CRPIX1'] - 1.0
-        y_center = pB_hdr['CRPIX2'] - 1.0
+        # FITS CRPIX are 1-based; subtract 1 to get 0-based pixel indices
+        x_center = pB_hdr["CRPIX1"] - 1.0
+        y_center = pB_hdr["CRPIX2"] - 1.0
 
-        if data_type == 'noise_gate_data':
-            x_pix_km = solar_radii_in_km * pB_hdr['CDELT1']
-            y_pix_km = solar_radii_in_km * pB_hdr['CDELT2']
+        if data_type == "noise_gate_data":
+            # Here we assume CDELT is already in units of solar radii per pixel
+            x_pix_km = solar_radii_in_km * pB_hdr["CDELT1"]
+            y_pix_km = solar_radii_in_km * pB_hdr["CDELT2"]
         else:
-            x_pix_km = solar_radii_in_km * pB_hdr['CDELT1'] / pB_hdr['RSUN']
-            y_pix_km = solar_radii_in_km * pB_hdr['CDELT2'] / pB_hdr['RSUN']
-
-        ydim, xdim = spatial_plane_distance.shape
+            # More typical coronagraph case:
+            # RSUN is apparent solar radius in same units as CDELT (e.g. arcsec),
+            # so solar_radii_in_km * CDELT / RSUN gives km per pixel.
+            x_pix_km = solar_radii_in_km * pB_hdr["CDELT1"] / pB_hdr["RSUN"]
+            y_pix_km = solar_radii_in_km * pB_hdr["CDELT2"] / pB_hdr["RSUN"]
 
     else:
-        ydim, xdim = spatial_plane_distance.shape
-        x_center = (xdim - 1) / 2.0
-        y_center = (ydim - 1) / 2.0
+        # No WCS/pixel scale: assume a fixed FOV of 64 solar radii across
+        # the image width, centred on the image centre.
+        x_center = (nx - 1) / 2.0
+        y_center = (ny - 1) / 2.0
 
-        fov_solar_radii = 64.0
-        x_pix_km = fov_solar_radii * solar_radii_in_km / xdim
-        y_pix_km = fov_solar_radii * solar_radii_in_km / ydim
+        fov_solar_radii = 64.0  # total FOV across the image in R_sun
+        x_pix_km = fov_solar_radii * solar_radii_in_km / nx
+        y_pix_km = fov_solar_radii * solar_radii_in_km / ny
 
-    # Compute distances in the image plane
-    for y in range(ydim):
-        dy = (y - y_center) * y_pix_km
-        for x in range(xdim):
-            dx = (x - x_center) * x_pix_km
-            spatial_plane_distance[y, x] = np.hypot(dx, dy)
+    # 3. Compute distance from Sun centre in the image plane
+    # Create a grid of pixel indices (0-based)
+    yy, xx = np.indices((ny, nx))
 
-    # This is r_pos in km; good to feed straight into radial_position_ps
+    # Convert pixel offsets from Sun centre to physical distances in km
+    dx = (xx - x_center) * x_pix_km
+    dy = (yy - y_center) * y_pix_km
+
+    # Hypotenuse gives the projected distance r_pos in the image plane
+    spatial_plane_distance = np.hypot(dx, dy)
+
+    # This is r_pos in km; suitable as `dist_image_plane` for radial_position_ps
     return spatial_plane_distance
-
-
-
-def print_minmax(arr, label="array"):
-    """
-    Prints the min/max of an array, ignoring NaN values.
-    """
-    arr = np.asarray(arr, dtype=float)
-    finite = np.isfinite(arr)
-
-    if not np.any(finite):
-        print(f"{label}: no finite values (all NaN or inf)")
-        return
-
-    print(f"{label}: min = {np.nanmin(arr):.6g}, max = {np.nanmax(arr):.6g}")
-
-
-
-def clean_distance(dist_km, dist_obs_to_source_km, max_factor=2.0):
-    """
-    Clean a distance array (in km):
-    - remove NaN/inf
-    - remove negative values
-    - remove values larger than max_factor * dist_obs_to_source_km
-
-    Returns a new array with bad entries set to np.nan.
-    """
-    dist = np.asarray(dist_km, dtype=float).copy()
-
-    # mask non-finite
-    bad = ~np.isfinite(dist)
-    # mask negative
-    bad |= (dist < 0)
-    # mask crazy-large values (beyond some multiple of observer distance)
-    bad |= (dist > max_factor * dist_obs_to_source_km)
-
-    dist[bad] = np.nan
-    return dist
-
-
-def to_solar_radii(dist_km):
-    """
-    Convert distance in km to solar radii.
-    """
-    R_SUN_KM = c.R_sun.to(u.kilometer).value
-    dist = np.asarray(dist_km, dtype=float)
-    return dist / R_SUN_KM
-
-def depth_from_radial(r_km, dist_obs_to_source_km):
-    r = np.asarray(r_km, dtype=float)
-    bad = ~np.isfinite(r) | (r <= 0) | (r > dist_obs_to_source_km)
-    D = np.full_like(r, np.nan, dtype=float)
-    good = ~bad
-
-    D[good] = 1.0 - (r[good] / dist_obs_to_source_km)
-    D[good] = np.clip(D[good], 0.0, 1.0)
-    return D
-
-def depth_map_from_los(l_plus_km, dist_obs_to_source_km, vmin=0.0, vmax=1.0):
-    """
-    Create a normalized depth map from l_plus (LOS distance, km).
-
-    D = 1 - l / dist_obs_to_source
-
-    - D ~ 0   → near the Sun (dark)
-    - D ~ 1   → near the observer (bright)
-
-    Returns
-    -------
-    D : ndarray
-        Normalized depth in [0, 1], with NaNs in invalid pixels.
-    """
-    l = np.asarray(l_plus_km, dtype=float).copy()
-
-    # Remove non-finite and outside [0, dist_obs]
-    bad = ~np.isfinite(l)
-    bad |= (l < 0)
-    bad |= (l > dist_obs_to_source_km)
-
-    D = np.full_like(l, np.nan, dtype=float)
-    good = ~bad
-
-    # normalized depth
-    D[good] = 1.0 - (l[good] / dist_obs_to_source_km)
-
-    # clip to [vmin, vmax] just for safety
-    D[good] = np.clip(D[good], vmin, vmax)
-
-    return D
