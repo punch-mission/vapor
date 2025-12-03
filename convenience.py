@@ -1,6 +1,8 @@
 import numpy as np
 import matplotlib.pyplot as plt
+import sys
 
+from pathlib import Path
 from astropy.io import fits
 from scipy import signal
 from astropy import units as u, constants as c
@@ -325,8 +327,6 @@ def blur_image(image: np.ndarray, n: int, n_y: int | None = None) -> np.ndarray:
     return blurred
 
 
-import numpy as np
-
 
 def clean_distance(dist_km, dist_obs_to_source_km, max_factor=2.0):
     """
@@ -378,3 +378,93 @@ def clean_distance(dist_km, dist_obs_to_source_km, max_factor=2.0):
     # Replace with NaN
     dist[bad] = np.nan
     return dist
+
+def replace_value_with_nan_inplace(arr, bad_value, out_value=np.nan):
+    """
+    Replace values in the given array *in place*.
+    """
+    mask = (arr == bad_value)
+    arr[mask] = out_value
+    return arr
+
+
+
+def copy_metadata(stereo_path, synthetic_path, output_path,
+                  preserve_synthetic_keys=None):
+    """
+    Copy headers from stereo_path onto synthetic_path data and save to output_path.
+
+    Parameters
+    ----------
+    stereo_path : str or Path
+        Path to the STEREO FITS (metadata template).
+    synthetic_path : str or Path
+        Path to the synthetic FITS (data template).
+    output_path : str or Path
+        Output FITS file path.
+    preserve_synthetic_keys : list of str, optional
+        List of header keys to preserve from the synthetic file (e.g., ["HISTORY"]).
+    """
+    stereo_path = Path(stereo_path)
+    synthetic_path = Path(synthetic_path)
+    output_path = Path(output_path)
+
+    if preserve_synthetic_keys is None:
+        preserve_synthetic_keys = []
+
+    with fits.open(stereo_path, mode="readonly") as hdu_stereo, \
+         fits.open(synthetic_path, mode="readonly") as hdu_syn:
+
+        # Build a new HDUList
+        new_hdus = []
+
+        # How many HDUs do we process?
+        n_hdus = min(len(hdu_stereo), len(hdu_syn))
+
+        for i in range(n_hdus):
+            stereo_hdu = hdu_stereo[i]
+            syn_hdu = hdu_syn[i]
+
+            # Copy STEREO header and synthetic data
+            new_header = stereo_hdu.header.copy()
+            new_data = syn_hdu.data
+
+            # Optionally preserve some synthetic header keys
+            for key in preserve_synthetic_keys:
+                if key in syn_hdu.header:
+                    new_header[key] = syn_hdu.header[key]
+
+            # Create appropriate HDU type
+            if i == 0:
+                new_hdu = fits.PrimaryHDU(data=new_data, header=new_header)
+            else:
+                if isinstance(stereo_hdu, fits.ImageHDU):
+                    new_hdu = fits.ImageHDU(data=new_data, header=new_header)
+                else:
+                    # fall back to image HDU if synthetic is an image
+                    new_hdu = fits.ImageHDU(data=new_data, header=new_header)
+
+            new_hdus.append(new_hdu)
+
+        # If synthetic has more HDUs than STEREO, optionally append them as-is
+        if len(hdu_syn) > n_hdus:
+            for extra_hdu in hdu_syn[n_hdus:]:
+                new_hdus.append(extra_hdu.copy())
+
+        new_hdul = fits.HDUList(new_hdus)
+        new_hdul.writeto(output_path, overwrite=True)
+        print(f"Wrote: {output_path}")
+
+
+if __name__ == "__main__":
+    if len(sys.argv) != 4:
+        print("Usage: python copy_stereo_metadata.py stereo.fits synthetic.fits output.fits")
+        sys.exit(1)
+
+    stereo_file = sys.argv[1]
+    synthetic_file = sys.argv[2]
+    output_file = sys.argv[3]
+
+    # example: preserve synthetic HISTORY, if any
+    copy_metadata(stereo_file, synthetic_file, output_file,
+                  preserve_synthetic_keys=["HISTORY"])
