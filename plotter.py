@@ -508,7 +508,7 @@ def create_triple_stereo_plot(
     axd["plotx"].set_ylabel(side_label)
     axd["plotx"].set_yticks([plot_min, plot_min + 0.5 * (plot_max - plot_min), plot_max])
     axd["plotx"].set_ylim([plot_min, plot_max])
-
+    axd["plotx"].set_xlim([np.nanmin(xvalues), np.nanmax(xvalues)])
 
     # Right panel
     if color_map == "no_color":
@@ -527,6 +527,7 @@ def create_triple_stereo_plot(
     axd["ploty"].set_xlabel(side_label)
     axd["ploty"].set_xticks([plot_min, plot_min + 0.5 * (plot_max - plot_min), plot_max])
     axd["ploty"].set_xlim([plot_min, plot_max])
+    axd["ploty"].set_xlim([np.nanmin(yvalues), np.nanmax(yvalues)])
 
     # Corner logo
     if include_name:
