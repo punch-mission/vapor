@@ -30,15 +30,20 @@ from core import radial_position_ps, radial_position_scatter
 from support import import_data, create_distance_map
 
 
+
+
 # -------------------------------------------------------------------
 # Matplotlib defaults
 # -------------------------------------------------------------------
 plt.rcParams.update({
     "text.usetex": False,
     "font.family": "sans-serif",
-    "font.sans-serif": "Helvetica",
+    "font.sans-serif": ["DejaVu Sans"],
     "font.size": 9,
 })
+
+
+
 
 R_SUN_KM = R_sun.to_value(u.km)
 DEFAULT_R_OBS = au.to_value(u.km)
@@ -460,6 +465,10 @@ def create_triple_stereo_plot(
         gridspec_kw={"width_ratios": [6, 1.3], "height_ratios": [1.3, 6]},
     )
 
+
+    #axd["plotx"].set_xlim(minxy, maxxy)
+    #axd["ploty"].set_ylim(minxy, maxxy)
+
     im = axd["image"].imshow(
         rad_out_orig,
         extent=[minxy, maxxy, minxy, maxxy],
@@ -469,6 +478,9 @@ def create_triple_stereo_plot(
         cmap=None if color_map == "no_color" else color_map,
         origin="lower",
     )
+
+    axd["plotx"].sharex(axd["image"])
+    axd["ploty"].sharey(axd["image"])
 
     axd["image"].yaxis.set_label_position("left")
     axd["image"].yaxis.tick_left()
@@ -508,7 +520,8 @@ def create_triple_stereo_plot(
     axd["plotx"].set_ylabel(side_label)
     axd["plotx"].set_yticks([plot_min, plot_min + 0.5 * (plot_max - plot_min), plot_max])
     axd["plotx"].set_ylim([plot_min, plot_max])
-    axd["plotx"].set_xlim([np.nanmin(xvalues), np.nanmax(xvalues)])
+    #axd["plotx"].set_xlim([np.nanmin(xvalues), np.nanmax(xvalues)])
+    axd["plotx"].set_xlim([minxy, maxxy])
 
     # Right panel
     if color_map == "no_color":
@@ -523,11 +536,19 @@ def create_triple_stereo_plot(
             )
 
 
+
+
+    # Right panel
     axd["ploty"].get_yaxis().set_visible(False)
     axd["ploty"].set_xlabel(side_label)
-    axd["ploty"].set_xticks([plot_min, plot_min + 0.5 * (plot_max - plot_min), plot_max])
+
+    # y-axis in ploty is the position axis (xvalues), so match the image extent
+    axd["ploty"].set_ylim([minxy, maxxy])
+
+    # x-axis in ploty is the profile value axis (yvalues), so match plot_min/plot_max
     axd["ploty"].set_xlim([plot_min, plot_max])
-    axd["ploty"].set_xlim([np.nanmin(yvalues), np.nanmax(yvalues)])
+    axd["ploty"].set_xticks([plot_min, plot_min + 0.5 * (plot_max - plot_min), plot_max])
+
 
     # Corner logo
     if include_name:
