@@ -196,26 +196,28 @@ def create_figure(
 # -------------------------------------------------------------------
 # Aggregator and triple-plot helpers
 # -------------------------------------------------------------------
-def data_aggregator(indata, aggregator_type="max"):
+def data_aggregator(indata, aggregator_type="max", percentile = 90):
     """
     Aggregate 1D array indata according to aggregator_type.
     """
     if aggregator_type == "mean":
-        return np.mean(indata)
-    if aggregator_type == "std":
-        return np.std(indata)
-    if aggregator_type == "med":
-        return np.median(indata)
-    if aggregator_type == "max":
-        return np.max(indata)
-    if aggregator_type == "min":
-        return np.min(indata)
-    if aggregator_type == "sum":
-        return np.sum(indata)
+        return np.nanmean(indata)
+    elif aggregator_type == "std":
+        return np.nanstd(indata)
+    elif aggregator_type == "med":
+        return np.nanmedian(indata)
+    elif aggregator_type == "max":
+        return np.nanmax(indata)
+    elif aggregator_type == "min":
+        return np.nanmin(indata)
+    elif aggregator_type == "sum":
+        return np.nansum(indata)
+    elif aggregator_type == "percentile":
+        return np.nanpercentile(indata, percentile)
     raise ValueError(f"Unknown aggregator_type: {aggregator_type}")
 
 
-def make_triple_plot_data(data, aggregator="max", minvalue=None, maxvalue=None, verbose=False):
+def make_triple_plot_data(data, aggregator="percentile", minvalue=None, maxvalue=None, verbose=False):
     """
     Reduce a 2D map into 1D x- and y-profiles by aggregating along rows/cols,
     with optional clipping in value-space [minvalue, maxvalue].
@@ -469,6 +471,7 @@ def create_triple_stereo_plot(
     #axd["plotx"].set_xlim(minxy, maxxy)
     #axd["ploty"].set_ylim(minxy, maxxy)
 
+# write to fits file or .npz
     im = axd["image"].imshow(
         rad_out_orig,
         extent=[minxy, maxxy, minxy, maxxy],

@@ -1,7 +1,7 @@
 import numpy as np
 import matplotlib.pyplot as plt
 import warnings
-
+import cv2
 from pathlib import Path
 from astropy.io import fits
 from typing import Iterable, Tuple, Optional, Union
@@ -293,7 +293,7 @@ def import_data(
             if base_data.shape != data.shape:
                 raise ValueError("Base image shape does not match image shape.")
 
-            data = data - base_data
+            data = cv2.GaussianBlur(data - base_data, (7,7),0)
 
     return data, header
 
