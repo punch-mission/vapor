@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Optional, Sequence, Tuple, Union
 
 import numpy as np
+import cv2 as cv
 import matplotlib.pyplot as plt
 import matplotlib.image as mpimg
 
@@ -25,6 +26,7 @@ from scipy.signal import savgol_filter
 
 from astropy.constants import R_sun, au
 import astropy.units as u
+from copy import deepcopy
 
 from core import radial_position_ps, radial_position_scatter
 from support import import_data, create_distance_map
@@ -261,6 +263,7 @@ def create_triple_stereo_plot(
     apply_filter="Gauss",
     gauss_filter_sig_x=1.5,
     gauss_filter_sig_y=1.5,
+    apply_morph = False,
     side_panel_filter="savgol",
     savgol_window_size=25,
     savgol_poly_order=2,
@@ -392,7 +395,7 @@ def create_triple_stereo_plot(
     if min_cut_off_value is not None:
         rad_out = np.where(rad_out < min_cut_off_value, np.nan, rad_out)
 
-    rad_out_orig = rad_out.copy()
+    rad_out_orig = deepcopy(rad_out)
 
     # --------------------------------------------------------------
     # 4) Optional smoothing and side profiles
@@ -400,6 +403,19 @@ def create_triple_stereo_plot(
     if apply_filter == "Gauss":
         sigma = [gauss_filter_sig_y, gauss_filter_sig_x]
         rad_out = gaussian_filter(rad_out, sigma=sigma, mode="constant")
+
+    if apply_morph is True:
+        median_filtered_image = gaussian_filter(rad_out, sigma=0.6)
+        mask = median_filtered_image < 2e7
+        kernel = np.ones((5, 5), np.uint8)
+        mask_int = mask.astype(np.uint8)
+        eroded_image = cv.erode(mask_int, kernel, iterations=2)
+
+        dialated_image = cv.dilate(eroded_image, kernel, iterations=2)
+        for i in range(3):
+            dialated_image = cv.dilate(dialated_image, kernel, iterations=1)
+            morph_mask = cv.morphologyEx(dialated_image, cv.MORPH_CLOSE, kernel)
+            rad_out = morph_mask * rad_out
 
     if plot_min is None:
         plot_min = float(np.nanmin(rad_out))
@@ -471,7 +487,7 @@ def create_triple_stereo_plot(
     #axd["plotx"].set_xlim(minxy, maxxy)
     #axd["ploty"].set_ylim(minxy, maxxy)
 
-# write to fits file or .npz
+#TODO: write to fits file or .npz
     im = axd["image"].imshow(
         rad_out_orig,
         extent=[minxy, maxxy, minxy, maxxy],
@@ -569,3 +585,5 @@ def create_triple_stereo_plot(
 
     plt.savefig(image_name, dpi=300)
     plt.close(fig)
+
+    return rad_out_orig, minxy, maxxy
