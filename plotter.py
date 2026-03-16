@@ -198,7 +198,7 @@ def create_figure(
 # -------------------------------------------------------------------
 # Aggregator and triple-plot helpers
 # -------------------------------------------------------------------
-def data_aggregator(indata, aggregator_type="max", percentile = 90):
+def data_aggregator(indata, aggregator_type="percentile", percentile = 90):
     """
     Aggregate 1D array indata according to aggregator_type.
     """
@@ -586,4 +586,4 @@ def create_triple_stereo_plot(
     plt.savefig(image_name, dpi=300)
     plt.close(fig)
 
-    return rad_out_orig, minxy, maxxy
+    return rad_out_orig, morph_mask, minxy, maxxy
