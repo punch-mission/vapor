@@ -272,7 +272,7 @@ def create_triple_stereo_plot(
     color_map="YlOrRd",
     include_name=True,
     dist_obs_to_source_km=DEFAULT_R_OBS,
-    solution="minus",            # "plus" or "minus" branch
+    solution="back",            # "front" or "back" branch
     quantity="los",              # "los" (default), "pos", or "radial"
     min_cut_off_value=None,
     max_cut_off_value=None,
@@ -358,12 +358,12 @@ def create_triple_stereo_plot(
         raise ValueError("output_method must be 'ps' or 'scattered'")
 
     # Choose branch
-    if solution == "plus":
+    if solution == "front":
         use_map = front_map
-    elif solution == "minus":
+    elif solution == "back":
         use_map = back_map
     else:
-        raise ValueError("solution must be 'plus' or 'minus'")
+        raise ValueError("solution must be 'front' or 'back'")
 
     # --------------------------------------------------------------
     # 3) Convert to requested plotted quantity in R_sun
