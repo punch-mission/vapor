@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import numpy as np
 import matplotlib.pyplot as plt
 import sys
@@ -6,9 +8,13 @@ from pathlib import Path
 from astropy.io import fits
 from scipy import signal
 from astropy import units as u, constants as c
+from scipy.ndimage import gaussian_filter
+from typing import Iterable, Optional, Union
+
+PathLike = Union[str, Path]
 
 # generate simple output images
-def show_1_image(img, title1=""):
+def show_1_image(img, title1="", cmap="gray",extent=None):
     """
     Display a single 2D data array as an image.
 
@@ -24,7 +30,8 @@ def show_1_image(img, title1=""):
     Displays the image using a grayscale colormap with a colorbar.
     """
     plt.figure(figsize=(6, 6))
-    plt.imshow(img, cmap="gray")
+    plt.imshow(img, cmap=cmap, origin="lower",
+    extent=extent)
     plt.title(title1)
     plt.colorbar(shrink=0.7)
     plt.axis("on")
@@ -32,7 +39,14 @@ def show_1_image(img, title1=""):
     plt.show()
 
 
-def show_2_images(img1, img2, title1="", title2=""):
+def show_2_images(img1, 
+                  img2, 
+                  title1="", 
+                  title2="",
+                  cmap1="gray",
+                  cmap2="gray",
+                  extent1=None,
+                  extent2=None):
     """
     Display two 2D data arrays side-by-side for comparison.
 
@@ -50,13 +64,16 @@ def show_2_images(img1, img2, title1="", title2=""):
     plt.figure(figsize=(12, 5))
 
     plt.subplot(1, 2, 1)
-    plt.imshow(img1, cmap="gray")
+    plt.imshow(img1, cmap=cmap1, origin="lower",
+    extent=extent1)
+
     plt.title(title1)
     plt.colorbar(shrink=0.7)
     plt.axis("on")
 
     plt.subplot(1, 2, 2)
-    plt.imshow(img2, cmap="gray")
+    plt.imshow(img2, cmap=cmap2, origin="lower",
+    extent=extent2)
     plt.title(title2)
     plt.colorbar(shrink=0.7)
     plt.axis("on")
@@ -65,7 +82,18 @@ def show_2_images(img1, img2, title1="", title2=""):
     plt.show()
 
 
-def show_3_images(img1, img2, img3, title1="", title2="", title3=""):
+def show_3_images(img1,
+                  img2, 
+                  img3, 
+                  title1="",
+                  title2="",
+                  title3="",
+                  cmap1="gray",
+                  cmap2="gray",
+                  cmap3="gray",
+                  extent1=None,
+                  extent2=None,
+                  extent3=None):
     """
     Display three 2D data arrays side-by-side for visual comparison.
 
@@ -83,19 +111,22 @@ def show_3_images(img1, img2, img3, title1="", title2="", title3=""):
     plt.figure(figsize=(15, 5))
 
     plt.subplot(1, 3, 1)
-    plt.imshow(img1, cmap="gray")
+    plt.imshow(img1, cmap=cmap1, origin="lower",
+    extent=extent1)
     plt.title(title1)
     plt.colorbar(shrink=0.7)
     plt.axis("on")
 
     plt.subplot(1, 3, 2)
-    plt.imshow(img2, cmap="gray")
+    plt.imshow(img2, cmap=cmap2, origin="lower",
+    extent=extent2)
     plt.title(title2)
     plt.colorbar(shrink=0.7)
     plt.axis("on")
 
     plt.subplot(1, 3, 3)
-    plt.imshow(img3, cmap="gray")
+    plt.imshow(img3, cmap=cmap3, origin="lower",
+    extent=extent3)
     plt.title(title3)
     plt.colorbar(shrink=0.7)
     plt.axis("on")
@@ -199,8 +230,7 @@ def to_solar_radii(dist_km):
     return dist / R_SUN_KM
 
 
-import numpy as np
-from astropy import units as u, constants as c
+
 
 def to_km(
     dist,
@@ -379,92 +409,335 @@ def clean_distance(dist_km, dist_obs_to_source_km, max_factor=2.0):
     dist[bad] = np.nan
     return dist
 
-def replace_value_with_nan_inplace(arr, bad_value, out_value=np.nan):
-    """
-    Replace values in the given array *in place*.
-    """
-    mask = (arr == bad_value)
-    arr[mask] = out_value
-    return arr
 
 
 
-def copy_metadata(stereo_path, synthetic_path, output_path,
+
+def copy_metadata(stereo_path, synthetic_input, output_path,
                   preserve_synthetic_keys=None):
     """
-    Copy headers from stereo_path onto synthetic_path data and save to output_path.
+    Copy headers from stereo_path onto synthetic_input data and save to output_path.
 
     Parameters
     ----------
     stereo_path : str or Path
         Path to the STEREO FITS (metadata template).
-    synthetic_path : str or Path
-        Path to the synthetic FITS (data template).
+
+    synthetic_input : str, Path, np.ndarray, or list of np.ndarray
+        - Path to synthetic FITS (original behaviour), OR
+        - numpy array (single-image), OR
+        - list of numpy arrays (for multiple HDUs).
+
     output_path : str or Path
         Output FITS file path.
+
     preserve_synthetic_keys : list of str, optional
-        List of header keys to preserve from the synthetic file (e.g., ["HISTORY"]).
+        List of header keys to preserve from the synthetic file (e.g. ["HISTORY"]).
     """
+
     stereo_path = Path(stereo_path)
-    synthetic_path = Path(synthetic_path)
     output_path = Path(output_path)
 
     if preserve_synthetic_keys is None:
         preserve_synthetic_keys = []
 
-    with fits.open(stereo_path, mode="readonly") as hdu_stereo, \
-         fits.open(synthetic_path, mode="readonly") as hdu_syn:
+    # ----------------------------------------------------------------------
+    # Load stereo FITS (metadata template)
+    # ----------------------------------------------------------------------
+    with fits.open(stereo_path, mode="readonly") as hdu_stereo:
 
-        # Build a new HDUList
+        # ------------------------------------------------------------------
+        # Determine the synthetic input type
+        # ------------------------------------------------------------------
+        if isinstance(synthetic_input, (str, Path)):
+            # Case A: synthetic_input is a FITS file path
+            syn_hdul = fits.open(synthetic_input, mode="readonly")
+            synthetic_is_fits = True
+
+        elif isinstance(synthetic_input, np.ndarray):
+            # Case B: a single numpy array → create minimal HDU list
+            syn_hdul = fits.HDUList([
+                fits.PrimaryHDU(data=synthetic_input)
+            ])
+            synthetic_is_fits = False
+
+        elif isinstance(synthetic_input, list) and all(isinstance(x, np.ndarray) for x in synthetic_input):
+            # Case C: list of numpy arrays → multi-HDU synthetic
+            hdus = [fits.PrimaryHDU(data=synthetic_input[0])]
+            for arr in synthetic_input[1:]:
+                hdus.append(fits.ImageHDU(data=arr))
+            syn_hdul = fits.HDUList(hdus)
+            synthetic_is_fits = False
+
+        else:
+            raise TypeError(
+                "synthetic_input must be a FITS path, a numpy array, "
+                "or a list of numpy arrays."
+            )
+
+        # ------------------------------------------------------------------
+        # Build new HDUs
+        # ------------------------------------------------------------------
         new_hdus = []
 
-        # How many HDUs do we process?
-        n_hdus = min(len(hdu_stereo), len(hdu_syn))
+        n_hdus = min(len(hdu_stereo), len(syn_hdul))
 
         for i in range(n_hdus):
             stereo_hdu = hdu_stereo[i]
-            syn_hdu = hdu_syn[i]
+            syn_hdu = syn_hdul[i]
 
-            # Copy STEREO header and synthetic data
+            # Copy stereo header and synthetic data
             new_header = stereo_hdu.header.copy()
             new_data = syn_hdu.data
 
-            # Optionally preserve some synthetic header keys
-            for key in preserve_synthetic_keys:
-                if key in syn_hdu.header:
-                    new_header[key] = syn_hdu.header[key]
+            # Optionally preserve synthetic header keys (only if synthetic was FITS)
+            if synthetic_is_fits:
+                for key in preserve_synthetic_keys:
+                    if key in syn_hdu.header:
+                        new_header[key] = syn_hdu.header[key]
 
-            # Create appropriate HDU type
+            # Construct HDU
             if i == 0:
                 new_hdu = fits.PrimaryHDU(data=new_data, header=new_header)
             else:
-                if isinstance(stereo_hdu, fits.ImageHDU):
-                    new_hdu = fits.ImageHDU(data=new_data, header=new_header)
-                else:
-                    # fall back to image HDU if synthetic is an image
-                    new_hdu = fits.ImageHDU(data=new_data, header=new_header)
+                new_hdu = fits.ImageHDU(data=new_data, header=new_header)
 
             new_hdus.append(new_hdu)
 
-        # If synthetic has more HDUs than STEREO, optionally append them as-is
-        if len(hdu_syn) > n_hdus:
-            for extra_hdu in hdu_syn[n_hdus:]:
-                new_hdus.append(extra_hdu.copy())
+        # Append any extra synthetic HDUs (mostly relevant for FITS input)
+        if len(syn_hdul) > n_hdus:
+            for extra in syn_hdul[n_hdus:]:
+                new_hdus.append(extra.copy())
 
+        # ------------------------------------------------------------------
+        # Write output
+        # ------------------------------------------------------------------
         new_hdul = fits.HDUList(new_hdus)
         new_hdul.writeto(output_path, overwrite=True)
         print(f"Wrote: {output_path}")
 
+        # Clean up FITS handles if opened from disk
+        if synthetic_is_fits:
+            syn_hdul.close()
 
-if __name__ == "__main__":
-    if len(sys.argv) != 4:
-        print("Usage: python copy_stereo_metadata.py stereo.fits synthetic.fits output.fits")
-        sys.exit(1)
 
-    stereo_file = sys.argv[1]
-    synthetic_file = sys.argv[2]
-    output_file = sys.argv[3]
 
-    # example: preserve synthetic HISTORY, if any
-    copy_metadata(stereo_file, synthetic_file, output_file,
-                  preserve_synthetic_keys=["HISTORY"])
+
+def upscale_and_smooth(data, factor=4, sigma=1.0):
+    """
+    Upscale a 2D array by an integer factor using nearest-neighbour replication
+    and apply a Gaussian smoothing.
+
+    Parameters
+    ----------
+    data : ndarray (ny, nx)
+        Input 2D array.
+    factor : int
+        Integer upscaling factor (e.g. 4: 512 → 2048).
+    sigma : float
+        Gaussian sigma in pixels (on the upscaled grid).
+
+    Returns
+    -------
+    upscaled : ndarray
+        Upscaled and smoothed array.
+    """
+    data = np.asarray(data)
+
+    # Nearest-neighbour upscale
+    upscaled = np.repeat(np.repeat(data, factor, axis=0), factor, axis=1)
+
+    # Smooth
+    if sigma > 0:
+        upscaled = gaussian_filter(upscaled, sigma=sigma)
+
+    return upscaled
+
+
+
+
+
+def downsample_2x(image: np.ndarray, method: str = "mean") -> np.ndarray:
+    """
+    Downsample a 2D image by factor 2 in each axis.
+
+    Parameters
+    ----------
+    image : np.ndarray
+        2D array with even dimensions.
+    method : {"mean", "sum", "decimate"}
+        - "mean": 2x2 binning mean (recommended; output typically float)
+        - "sum":  2x2 binning sum
+        - "decimate": take every other pixel (fastest)
+
+    Returns
+    -------
+    np.ndarray
+        Downsampled image of shape (ny/2, nx/2).
+    """
+    if image.ndim != 2:
+        raise ValueError(f"Expected 2D image, got shape {image.shape}")
+
+    ny, nx = image.shape
+    if (ny % 2) or (nx % 2):
+        raise ValueError(f"Image shape must be even, got {image.shape}")
+
+    method = method.lower()
+    if method == "decimate":
+        return image[::2, ::2]
+
+    b = image.reshape(ny // 2, 2, nx // 2, 2)
+    if method == "mean":
+        return b.mean(axis=(1, 3))
+    if method == "sum":
+        return b.sum(axis=(1, 3))
+
+    raise ValueError(f"Unknown method: {method}")
+
+
+def update_header_for_2x_downsample(hdr: fits.Header) -> fits.Header:
+    """
+    Update common WCS/axis keywords for a 2x downsample.
+
+    Applies:
+      - CRPIX1/2 -> CRPIX1/2 / 2
+      - CDi_j (if present) -> CDi_j * 2
+      - else CDELT1/2 (if present) -> CDELT1/2 * 2
+      - NAXIS1/2 -> NAXIS1/2 / 2 (if present)
+
+    Notes
+    -----
+    This assumes you are binning/decimating by exactly 2 in both axes.
+    """
+    hdr2 = hdr.copy()
+
+    for k in ("CRPIX1", "CRPIX2"):
+        if k in hdr2:
+            hdr2[k] = hdr2[k] / 2.0
+
+    cd_keys = ("CD1_1", "CD1_2", "CD2_1", "CD2_2")
+    has_cd = any(k in hdr2 for k in cd_keys)
+
+    if has_cd:
+        for k in cd_keys:
+            if k in hdr2:
+                hdr2[k] = hdr2[k] * 2.0
+    else:
+        for k in ("CDELT1", "CDELT2"):
+            if k in hdr2:
+                hdr2[k] = hdr2[k] * 2.0
+
+    if "NAXIS1" in hdr2:
+        hdr2["NAXIS1"] = int(hdr2["NAXIS1"] // 2)
+    if "NAXIS2" in hdr2:
+        hdr2["NAXIS2"] = int(hdr2["NAXIS2"] // 2)
+
+    hdr2.add_history("Downsampled 2x (2048->1024) and updated CRPIX/CDELT/CD accordingly.")
+    return hdr2
+
+
+def shrink_fits_file_inplace(
+    file_path: PathLike,
+    method: str = "mean",
+    backup: bool = True,
+    all_image_hdus: bool = False,
+    overwrite: bool = True,
+) -> Path:
+    """
+    Downsample FITS image data in-place (2048->1024 if input is 2k square),
+    updating header WCS/axis keywords.
+
+    Parameters
+    ----------
+    file_path : str | Path
+        Path to a FITS file.
+    method : {"mean","sum","decimate"}
+        Downsampling method.
+    backup : bool
+        If True, create a sibling backup "<file>.bak" if it doesn't already exist.
+    all_image_hdus : bool
+        If False, only process HDU 0 (PrimaryHDU) if it is a 2D image.
+        If True, process every HDU that contains a 2D image array.
+    overwrite : bool
+        If False, raises if output would overwrite (only relevant if you adapt
+        this later to a different output path).
+
+    Returns
+    -------
+    Path
+        The path that was written (same as input).
+    """
+    p = Path(file_path).expanduser().resolve()
+    if not p.exists():
+        raise FileNotFoundError(p)
+
+    if backup:
+        bak = p.with_suffix(p.suffix + ".bak")
+        if not bak.exists():
+            bak.write_bytes(p.read_bytes())
+
+    # Read, build a new HDUList, then atomically replace original
+    with fits.open(p, mode="readonly", memmap=False) as hdul:
+        new_hdul = fits.HDUList()
+
+        for i, hdu in enumerate(hdul):
+            data = hdu.data
+            hdr = hdu.header
+
+            do_this = False
+            if all_image_hdus:
+                do_this = isinstance(data, np.ndarray) and data.ndim == 2
+            else:
+                do_this = (i == 0) and isinstance(data, np.ndarray) and data.ndim == 2
+
+            if do_this:
+                new_data = downsample_2x(data, method=method)
+                new_hdr = update_header_for_2x_downsample(hdr)
+
+                if isinstance(hdu, fits.PrimaryHDU):
+                    new_hdu = fits.PrimaryHDU(data=new_data, header=new_hdr)
+                else:
+                    new_hdu = fits.ImageHDU(data=new_data, header=new_hdr, name=hdu.name)
+
+                new_hdul.append(new_hdu)
+            else:
+                new_hdul.append(hdu.copy())
+
+    # Write to temp then replace for safety
+    tmp = p.with_suffix(p.suffix + ".tmp")
+    if tmp.exists() and not overwrite:
+        raise FileExistsError(tmp)
+
+    new_hdul.writeto(tmp, overwrite=True, output_verify="fix")
+    tmp.replace(p)
+
+    return p
+
+
+def shrink_fits_many_inplace(
+    paths: Iterable[PathLike],
+    method: str = "mean",
+    backup: bool = True,
+    all_image_hdus: bool = False,
+) -> list[Path]:
+    """
+    Convenience wrapper to process multiple FITS files.
+
+    Returns list of processed Paths.
+    """
+    out: list[Path] = []
+    for fp in paths:
+        out.append(
+            shrink_fits_file_inplace(
+                fp, method=method, backup=backup, all_image_hdus=all_image_hdus
+            )
+        )
+    return out
+
+
+def list_fits_in_dir(directory: PathLike, pattern: str = "*.fits") -> list[Path]:
+    """
+    Return sorted FITS paths in a directory matching a glob pattern.
+    """
+    d = Path(directory).expanduser().resolve()
+    return sorted(d.glob(pattern))

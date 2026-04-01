@@ -1,481 +1,589 @@
-import matplotlib.pyplot as plt
-import numpy as np
-import core
+"""
+plotter.py — plotting utilities for VAPOR
 
-from support import import_data
-from typing import List, Optional, Tuple, Literal
+This module provides:
+- create_figure_core: save a single 2D array as a PNG with basic scaling rules
+- create_figure: convenience wrapper to save tB and pB PNGs from file paths
+- create_triple_stereo_plot: the “triple plot” (central map + x/y profiles)
+
+IMPORTANT (API alignment):
+- support.import_data() loads ONE file at a time and accepts base_file_path=...
+- core.radial_position_ps(tb_path, pb_path, return_key=...) returns ONE map at a time
+  (front/back solutions are accessed via different return_key values)
+"""
+
+import os
+from pathlib import Path
+from typing import Optional, Sequence, Tuple, Union
+
+import numpy as np
+import cv2 as cv
+import matplotlib.pyplot as plt
+import matplotlib.image as mpimg
+
 from scipy.ndimage import gaussian_filter
 from scipy.signal import savgol_filter
-from mpl_toolkits.axes_grid1 import make_axes_locatable  # if you use it elsewhere
-from astropy import units as u, constants as c
 
-def _create_figure_core(
-    image_data: np.ndarray,
+from astropy.constants import R_sun, au
+import astropy.units as u
+from copy import deepcopy
+
+from core import radial_position_ps, radial_position_scatter
+from support import import_data, create_distance_map
+
+
+
+
+# -------------------------------------------------------------------
+# Matplotlib defaults
+# -------------------------------------------------------------------
+plt.rcParams.update({
+    "text.usetex": False,
+    "font.family": "sans-serif",
+    "font.sans-serif": ["DejaVu Sans"],
+    "font.size": 9,
+})
+
+
+
+
+R_SUN_KM = R_sun.to_value(u.km)
+DEFAULT_R_OBS = au.to_value(u.km)
+
+
+# -------------------------------------------------------------------
+# Helpers
+# -------------------------------------------------------------------
+def _split_paths(
+    file_list: Sequence[Union[str, Path]],
+    base_file_list: Optional[Sequence[Union[str, Path]]] = None,
+) -> Tuple[Path, Path, Optional[Path], Optional[Path]]:
+    """
+    Split [tb_path, pb_path] and optional [base_tb_path, base_pb_path].
+    """
+    if file_list is None or len(file_list) != 2:
+        raise ValueError("file_list must be a 2-element sequence: [tb_path, pb_path]")
+
+    tb_path = Path(file_list[0])
+    pb_path = Path(file_list[1])
+
+    base_tb = base_pb = None
+    if base_file_list is not None:
+        if len(base_file_list) != 2:
+            raise ValueError("base_file_list must be a 2-element sequence: [base_tb_path, base_pb_path]")
+        base_tb = Path(base_file_list[0]) if base_file_list[0] is not None else None
+        base_pb = Path(base_file_list[1]) if base_file_list[1] is not None else None
+
+    return tb_path, pb_path, base_tb, base_pb
+
+
+def _load_tb_pb(
+    tb_path: Path,
+    pb_path: Path,
     *,
-    image_name: Optional[str] = None,
-    data_type: Optional[str] = None,
-) -> None:
+    data_type: Optional[str],
+    use_mask: bool,
+    use_cdelt: bool,
+    subtract_base_image: bool,
+    base_tb_path: Optional[Path],
+    base_pb_path: Optional[Path],
+):
     """
-    Render a 2D image array as a grayscale PNG with no axes or margins.
-
-    Parameters
-    ----------
-    image_data : np.ndarray
-        2D array representing the image to display.
-    image_name : str, optional
-        Output filename (e.g., "image.png"). If None, defaults to "Test.png".
-    data_type : {"stereo_dif", "stereo", "noise", "forward", None}, optional
-        Determines default scaling and field-of-view handling for specific
-        instruments or synthetic data types.
-
-        - "stereo_dif", "stereo":  vmin=-20, vmax=20, extent [-16, 16] Rs
-        - "noise":                  vmin=-15, vmax=15, extent [-16, 16] Rs
-        - "forward":                extent [-32, 32] Rs (synthetic models)
-        - None:                     automatic scaling
+    Load tB and pB with consistent options using support.import_data() (single-file API).
     """
-
-    # Default filename
-    if image_name is None:
-        image_name = "Test.png"
-
-    # Create borderless figure
-    fig = plt.figure(frameon=False)
-    ax = plt.Axes(fig, [0.0, 0.0, 1.0, 1.0])
-    ax.set_axis_off()
-    fig.add_axes(ax)
-    fig.set_size_inches(15, 15)
-
-    # Set defaults based on type
-    if data_type in ("stereo", "stereo_dif"):
-        vmin, vmax = -20, 20
-        extent = [-16, 16, -16, 16]
-    elif data_type == "noise":
-        vmin, vmax = -15, 15
-        extent = [-16, 16, -16, 16]
-    elif data_type == "forward":
-        vmin, vmax = None, None
-        extent = [-32, 32, -32, 32]
-    else:
-        vmin, vmax = None, None
-        extent = None
-
-    # Plot
-    if extent is None:
-        ax.imshow(image_data, cmap="gray", origin="lower", vmin=vmin, vmax=vmax)
-    else:
-        ax.imshow(
-            image_data,
-            cmap="gray",
-            origin="lower",
-            vmin=vmin,
-            vmax=vmax,
-            extent=extent,
-        )
-
-    plt.savefig(image_name, format="png", dpi=300)
-    plt.close(fig)
-
-
-
-# create figures
-def create_figure(
-    file_list: List[str],
-    *,
-    data_type: Optional[str] = None,
-    use_mask: bool = True,
-    use_cdelt: bool = False,
-    subtract_base_image: bool = False,
-    base_file_list: Optional[List[str]] = None,
-    image_name: Optional[str] = None,
-) -> None:
-    """
-    High-level wrapper: loads tB/pB images from FITS files and writes
-    two PNG images ("tB" and "pB") using `_create_figure_core`.
-
-    Parameters
-    ----------
-    file_list : list of str
-        Paths to input FITS files. Passed to `import_data`.
-    data_type : str, optional
-        Instrument/data category (e.g., "stereo", "noise"). Passed through to
-        `_create_figure_core` for correct display scaling.
-    use_mask : bool, default True
-        Whether to apply instrument masks when loading data.
-    use_cdelt : bool, default True
-        Whether to use CDELT-based coordinate scaling.
-    subtract_base_image : bool, default False
-        Whether to subtract a base image (for running-difference).
-    base_file_list : list of str, optional
-        Files used as base for subtraction if enabled.
-    image_name : str, optional
-        Base name for output files. If None, defaults to `data_type`.
-    """
-
-    # Load data from FITS through your existing pipeline
-    tB_data, pB_data, tB_hdr, pB_hdr = import_data(
-        file_list,
+    tB, _ = import_data(
+        tb_path,
         data_type=data_type,
         use_mask=use_mask,
         use_cdelt=use_cdelt,
         subtract_base_image=subtract_base_image,
-        base_file_list=base_file_list,
+        base_file_path=str(base_tb_path) if base_tb_path is not None else None,
     )
 
-    # Pick a base name if none given
+    pB, _ = import_data(
+        pb_path,
+        data_type=data_type,
+        use_mask=use_mask,
+        use_cdelt=use_cdelt,
+        subtract_base_image=subtract_base_image,
+        base_file_path=str(base_pb_path) if base_pb_path is not None else None,
+    )
+
+    tB = np.asarray(tB, dtype=float)
+    pB = np.asarray(pB, dtype=float)
+
+    if tB.shape != pB.shape:
+        raise ValueError(f"tB and pB must have the same shape; got {tB.shape} vs {pB.shape}")
+
+    return tB, pB
+
+
+def _get_minmax_fov(data_type: Optional[str], dist_image_plane_km: Optional[np.ndarray] = None) -> Tuple[float, float]:
+    """
+    Determine (minxy, maxxy) in R_sun units for plotting.
+    """
+    if data_type in ("stereo_dif", "stereo", "noise"):
+        return -16.0, 16.0
+    if data_type == "forward":
+        return -32.0, 32.0
+    if dist_image_plane_km is not None and np.isfinite(dist_image_plane_km).any():
+        max_r_rs = float(np.nanmax(dist_image_plane_km) / R_SUN_KM)
+        maxxy = float(np.ceil(max_r_rs))
+        return -maxxy, maxxy
+    return -16.0, 16.0
+
+
+# -------------------------------------------------------------------
+# Simple figure creators
+# -------------------------------------------------------------------
+def create_figure_core(image_data, image_name=None, data_type=None):
+    """
+    Save a simple image of the data with basic scaling per data_type.
+    """
     if image_name is None:
-        image_name = data_type if data_type is not None else "figure"
+        image_name = "Test.png"
 
-    # Output filenames
-    pB_name = f"pB_{image_name}.png"
-    tB_name = f"tB_{image_name}.png"
+    figure = plt.figure(frameon=False)
+    axes = plt.Axes(figure, [0.0, 0.0, 1.0, 1.0])
+    axes.set_axis_off()
+    figure.add_axes(axes)
+    figure.set_size_inches(15, 15)
 
-    # Produce the PNGs
-    _create_figure_core(pB_data, image_name=pB_name, data_type=data_type)
-    _create_figure_core(tB_data, image_name=tB_name, data_type=data_type)
+    if data_type in ("stereo_dif", "stereo"):
+        plt.imshow(image_data, cmap="gray", vmin=-20, vmax=20, origin="lower", axes=axes)
+    elif data_type == "noise":
+        plt.imshow(image_data, cmap="gray", vmin=-15, vmax=15, origin="lower", axes=axes)
+    elif data_type == "forward":
+        minxy, maxxy = -32, 32
+        plt.imshow(image_data, extent=[minxy, maxxy, minxy, maxxy], cmap="gray", origin="lower", axes=axes)
+    else:
+        plt.imshow(image_data, cmap="gray", origin="lower", axes=axes)
+
+    plt.savefig(image_name, format="png")
+    plt.close()
 
 
-R_SUN_KM: float = c.R_sun.to(u.kilometer).value
-AggregatorType = Literal["mean", "std", "med", "max", "min", "sum"]
-SolutionType   = Literal["plus", "minus"]
-
-def _make_triple_plot_data(
-    data: np.ndarray,
-    aggregator: AggregatorType,
-    *,
-    minvalue: Optional[float] = None,
-    maxvalue: Optional[float] = None,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+def create_figure(
+    file_list,
+    data_type=None,
+    use_mask=True,
+    use_cdelt=True,
+    subtract_base_image=False,
+    base_file_list=None,
+    image_name=None,
+):
     """
-    Aggregate a 2D array along rows and columns, within a value range.
-
-    For each row and column in the input 2D array, this function selects all
-    values within [minvalue, maxvalue] and applies the requested aggregation
-    function (e.g., mean, max, sum). It returns the aggregated profiles along
-    the two axes, together with the number of contributing pixels in each row
-    and column.
-
-    Parameters
-    ----------
-    data : np.ndarray
-        2D input data array of shape (ny, nx).
-    aggregator : {"mean", "std", "med", "max", "min", "sum"}
-        Aggregation function to apply along each row and column.
-    minvalue : float, optional
-        Lower bound on values to include. If None, uses np.nanmin(data).
-    maxvalue : float, optional
-        Upper bound on values to include. If None, uses np.nanmax(data).
-
-    Returns
-    -------
-    y_profile : np.ndarray
-        1D array of length ny with aggregated values along each row.
-    x_profile : np.ndarray
-        1D array of length nx with aggregated values along each column.
-    y_counts : np.ndarray
-        1D array of length ny with the number of data points used in each row.
-    x_counts : np.ndarray
-        1D array of length nx with the number of data points used in each column.
+    Convenience wrapper: load tB, pB and save individual PNGs.
     """
-    if data.ndim != 2:
-        raise ValueError("data must be a 2D array")
+    tb_path, pb_path, base_tb, base_pb = _split_paths(file_list, base_file_list)
 
-    ny, nx = data.shape
+    tB, pB = _load_tb_pb(
+        tb_path,
+        pb_path,
+        data_type=data_type,
+        use_mask=use_mask,
+        use_cdelt=use_cdelt,
+        subtract_base_image=subtract_base_image,
+        base_tb_path=base_tb,
+        base_pb_path=base_pb,
+    )
+
+    if image_name is None:
+        image_name = data_type or "image"
+
+    create_figure_core(pB, f"pB - {image_name}.png", data_type)
+    create_figure_core(tB, f"tB - {image_name}.png", data_type)
+
+
+# -------------------------------------------------------------------
+# Aggregator and triple-plot helpers
+# -------------------------------------------------------------------
+def data_aggregator(indata, aggregator_type="percentile", percentile = 90):
+    """
+    Aggregate 1D array indata according to aggregator_type.
+    """
+    if aggregator_type == "mean":
+        return np.nanmean(indata)
+    elif aggregator_type == "std":
+        return np.nanstd(indata)
+    elif aggregator_type == "med":
+        return np.nanmedian(indata)
+    elif aggregator_type == "max":
+        return np.nanmax(indata)
+    elif aggregator_type == "min":
+        return np.nanmin(indata)
+    elif aggregator_type == "sum":
+        return np.nansum(indata)
+    elif aggregator_type == "percentile":
+        return np.nanpercentile(indata, percentile)
+    raise ValueError(f"Unknown aggregator_type: {aggregator_type}")
+
+
+def make_triple_plot_data(data, aggregator="percentile", minvalue=None, maxvalue=None, verbose=False):
+    """
+    Reduce a 2D map into 1D x- and y-profiles by aggregating along rows/cols,
+    with optional clipping in value-space [minvalue, maxvalue].
+    """
+    dim = data.shape
 
     if minvalue is None:
         minvalue = np.nanmin(data)
     if maxvalue is None:
         maxvalue = np.nanmax(data)
 
-    # Map aggregator string to numpy function
-    agg_map = {
-        "mean": np.mean,
-        "std":  np.std,
-        "med":  np.median,
-        "max":  np.max,
-        "min":  np.min,
-        "sum":  np.sum,
-    }
+    yPlot = np.zeros(dim[0])
+    for iStep in range(dim[0]):
+        row = data[iStep, :]
+        outrow = row[(row >= minvalue) & (row <= maxvalue)]
+        yPlot[iStep] = data_aggregator(outrow, aggregator_type=aggregator) if outrow.size > 0 else 0.0
 
-    if aggregator not in agg_map:
-        raise ValueError(f"Invalid aggregator '{aggregator}'. "
-                         f"Must be one of {list(agg_map.keys())}.")
+    xPlot = np.zeros(dim[1])
+    for jStep in range(dim[1]):
+        col = data[:, jStep]
+        outcol = col[(col >= minvalue) & (col <= maxvalue)]
+        xPlot[jStep] = data_aggregator(outcol, aggregator_type=aggregator) if outcol.size > 0 else 0.0
 
-    agg_func = agg_map[aggregator]
+    return yPlot, xPlot
 
-    # --- Row-wise aggregation (y) ---
-    y_profile: list[float] = []
-    y_counts: list[int] = []
 
-    for i in range(ny):
-        row = data[i, :]
-        mask = (row >= minvalue) & (row <= maxvalue) & np.isfinite(row)
-        selected = row[mask]
+# -------------------------------------------------------------------
+# Triple plot (updated to match new core + support APIs)
+# -------------------------------------------------------------------
+def create_triple_stereo_plot(
+    file_list,
+    data_type=None,
+    use_mask=True,
+    use_cdelt=False,
+    subtract_base_image=False,
+    base_file_list=None,
+    output_method="ps",          # "ps" or "scattered"
+    image_name=None,
+    plot_max=None,
+    plot_min=None,
+    apply_filter="Gauss",
+    gauss_filter_sig_x=1.5,
+    gauss_filter_sig_y=1.5,
+    apply_morph = False,
+    side_panel_filter="savgol",
+    savgol_window_size=25,
+    savgol_poly_order=2,
+    show_time=False,
+    verbose=False,
+    color_map="YlOrRd",
+    include_name=True,
+    dist_obs_to_source_km=DEFAULT_R_OBS,
+    solution="back",            # "front" or "back" branch
+    quantity="los",              # "los" (default), "pos", or "radial"
+    min_cut_off_value=None,
+    max_cut_off_value=None,
+):
+    """
+    Create a "triple" plot:
+      - central 2D map (LOS, POS distance, or radial distance) in R_sun,
+      - top panel: X-profile,
+      - right panel: Y-profile.
 
-        if selected.size == 0:
-            # No valid points in this row; use 0 as in the original implementation
-            out_value = 0.0
-            count = 0
-        else:
-            out_value = float(agg_func(selected))
-            count = selected.size
+    This version is API-consistent with:
+      - support.import_data(file_path, ..., base_file_path=...)
+      - core.radial_position_ps(tb_path, pb_path, return_key=...)
+    """
+    # --------------------------------------------------------------
+    # 0) Parse inputs
+    # --------------------------------------------------------------
+    tb_path, pb_path, base_tb, base_pb = _split_paths(file_list, base_file_list)
 
-        y_profile.append(out_value)
-        y_counts.append(count)
-
-    # --- Column-wise aggregation (x) ---
-    x_profile: list[float] = []
-    x_counts: list[int] = []
-
-    for j in range(nx):
-        col = data[:, j]
-        mask = (col >= minvalue) & (col <= maxvalue) & np.isfinite(col)
-        selected = col[mask]
-
-        if selected.size == 0:
-            out_value = 0.0
-            count = 0
-        else:
-            out_value = float(agg_func(selected))
-            count = selected.size
-
-        x_profile.append(out_value)
-        x_counts.append(count)
-
-    return (
-        np.asarray(y_profile, dtype=float),
-        np.asarray(x_profile, dtype=float),
-        np.asarray(y_counts, dtype=int),
-        np.asarray(x_counts, dtype=int),
+    # --------------------------------------------------------------
+    # 1) Load data
+    # --------------------------------------------------------------
+    _tB, _pB = _load_tb_pb(
+        tb_path,
+        pb_path,
+        data_type=data_type,
+        use_mask=use_mask,
+        use_cdelt=use_cdelt,
+        subtract_base_image=subtract_base_image,
+        base_tb_path=base_tb,
+        base_pb_path=base_pb,
     )
 
+    # Distance map for FOV fallback (create_distance_map expects a file path)
+    dist_image_plane_km = create_distance_map(pb_path, data_type=data_type, use_cdelt=use_cdelt)
 
-def create_triple_stereo_plot(
-    tB: np.ndarray,
-    pB: np.ndarray,
-    dist_image_plane: np.ndarray,  # impact parameter map (km), same shape as tB/pB
-    dist_obs_to_source: float,     # observer–Sun distance (km), e.g. 1 AU
-    *,
-    solution: SolutionType = "plus",   # "plus" → foreground, "minus" → background
-    image_name: Optional[str] = None,
-    artificial_max: Optional[float] = None,
-) -> None:
-    """
-    Create a triple-panel plot using polarization-ratio LOS distances
-    (point-source approximation).
+    R_obs_km = float(dist_obs_to_source_km)
+    R_obs_rs = R_obs_km / R_SUN_KM
 
-    The function:
-    1. Uses `core.radial_position_ps` to compute LOS distances from tB/pB.
-    2. Selects either the foreground ("plus") or background ("minus") solution.
-    3. Constructs a LOS "depth" map in solar radii.
-    4. Derives 1D aggregated profiles along x and y.
-    5. Produces a figure with:
-       - central image of the LOS map,
-       - top panel: horizontal LOS profile,
-       - right panel: vertical LOS profile.
+    # --------------------------------------------------------------
+    # 2) Run inversion (ps or scattered)
+    # --------------------------------------------------------------
+    if output_method == "ps":
+        if quantity == "radial":
+            front_key, back_key = "r_front", "r_back"
+        elif quantity == "pos":
+            front_key, back_key = "x_front", "x_back"
+        elif quantity == "los":
+            front_key, back_key = "l_front", "l_back"
+        else:
+            raise ValueError("quantity must be 'los', 'pos', or 'radial'")
 
-    Parameters
-    ----------
-    tB, pB : np.ndarray
-        2D arrays of total and polarized brightness, respectively.
-    dist_image_plane : np.ndarray
-        2D array of projected distance from Sun centre in the image plane (km).
-        Must have the same shape as `tB` and `pB`.
-    dist_obs_to_source : float
-        Distance from observer to Sun (km), e.g. 1 AU in km.
-    solution : {"plus", "minus"}, keyword-only
-        Which polarization-ratio solution to use:
-        - "plus"  → foreground LOS distance (l_plus)
-        - "minus" → background LOS distance (l_minus)
-    image_name : str, optional
-        Output filename for the resulting PNG. If None, defaults to
-        "triple_plot_<solution>.png".
-    artificial_max : float, optional
-        Maximum LOS distance (in R_sun) used for color scaling and
-        profile plotting. If None, it is estimated from the data
-        (95th percentile of finite values).
-    """
+        front_map = radial_position_ps(
+            tb_path, pb_path,
+            return_key=front_key,
+            data_type=data_type,
+            use_mask=use_mask,
+            use_cdelt=use_cdelt,
+            subtract_base_image=subtract_base_image,
+            base_tb_path=str(base_tb) if base_tb is not None else None,
+            base_pb_path=str(base_pb) if base_pb is not None else None,
+            dist_obs_to_source_km=R_obs_km,
+        )
+        back_map = radial_position_ps(
+            tb_path, pb_path,
+            return_key=back_key,
+            data_type=data_type,
+            use_mask=use_mask,
+            use_cdelt=use_cdelt,
+            subtract_base_image=subtract_base_image,
+            base_tb_path=str(base_tb) if base_tb is not None else None,
+            base_pb_path=str(base_pb) if base_pb is not None else None,
+            dist_obs_to_source_km=R_obs_km,
+        )
 
-    if tB.shape != pB.shape or tB.shape != dist_image_plane.shape:
-        raise ValueError("tB, pB, and dist_image_plane must have the same shape")
+    elif output_method == "scattered":
+        # Placeholder: only wire this if/when radial_position_scatter matches the new API.
+        raise NotImplementedError(
+            "output_method='scattered' is not wired yet: radial_position_scatter must be updated "
+            "to accept (tb_path, pb_path, return_key=...) like radial_position_ps."
+        )
+    else:
+        raise ValueError("output_method must be 'ps' or 'scattered'")
+
+    # Choose branch
+    if solution == "front":
+        use_map = front_map
+    elif solution == "back":
+        use_map = back_map
+    else:
+        raise ValueError("solution must be 'front' or 'back'")
+
+    # --------------------------------------------------------------
+    # 3) Convert to requested plotted quantity in R_sun
+    # --------------------------------------------------------------
+    if quantity == "los":
+        # use_map is l_front/l_back in km (observer->feature)
+        l_use_rs = use_map / R_SUN_KM
+        rad_out = R_obs_rs - l_use_rs
+        cb_label = "Line of Sight (R$_\\odot$)"
+        side_label = "LOS (R$_\\odot$)"
+
+    elif quantity == "pos":
+        # use_map is x_front/x_back in km
+        rad_out = use_map / R_SUN_KM
+        cb_label = "Distance from POS (R$_\\odot$)"
+        side_label = "POS x (R$_\\odot$)"
+
+    elif quantity == "radial":
+        # use_map is r_front/r_back in km
+        rad_out = use_map / R_SUN_KM
+        cb_label = "Radial distance (R$_\\odot$)"
+        side_label = "Radial (R$_\\odot$)"
+    else:
+        raise ValueError("quantity must be 'los', 'pos', or 'radial'")
+
+    # Cutoffs
+    if max_cut_off_value is not None:
+        rad_out = np.where(rad_out > max_cut_off_value, np.nan, rad_out)
+    if min_cut_off_value is not None:
+        rad_out = np.where(rad_out < min_cut_off_value, np.nan, rad_out)
+
+    rad_out_orig = deepcopy(rad_out)
+
+    # --------------------------------------------------------------
+    # 4) Optional smoothing and side profiles
+    # --------------------------------------------------------------
+    if apply_filter == "Gauss":
+        sigma = [gauss_filter_sig_y, gauss_filter_sig_x]
+        rad_out = gaussian_filter(rad_out, sigma=sigma, mode="constant")
+
+    if apply_morph is True:
+        median_filtered_image = gaussian_filter(rad_out, sigma=0.6)
+        mask = median_filtered_image < 2e7
+        kernel = np.ones((5, 5), np.uint8)
+        mask_int = mask.astype(np.uint8)
+        eroded_image = cv.erode(mask_int, kernel, iterations=2)
+
+        dialated_image = cv.dilate(eroded_image, kernel, iterations=2)
+        for i in range(3):
+            dialated_image = cv.dilate(dialated_image, kernel, iterations=1)
+            morph_mask = cv.morphologyEx(dialated_image, cv.MORPH_CLOSE, kernel)
+            rad_out = morph_mask * rad_out
+
+    if plot_min is None:
+        plot_min = float(np.nanmin(rad_out))
+    if plot_max is None:
+        plot_max = float(np.nanmax(rad_out))
+
+    y_rad_out, x_rad_out = make_triple_plot_data(
+        rad_out, aggregator="max", minvalue=plot_min, maxvalue=plot_max
+    )
+
+    if side_panel_filter == "savgol":
+        # guard against too-large windows
+        n = x_rad_out.size
+        win = int(savgol_window_size)
+        if win >= n:
+            win = n - 1 if (n % 2 == 0) else n
+        if win < 3:
+            win = 3
+        if win % 2 == 0:
+            win += 1
+        poly = int(min(savgol_poly_order, win - 1))
+
+        x_rad_out = savgol_filter(x_rad_out, win, poly)
+        y_rad_out = savgol_filter(y_rad_out, win, poly)
 
     if image_name is None:
-        image_name = f"triple_plot_{solution}.png"
+        image_name = "XTRIPLE_plot.png"
 
+    if verbose:
+        try:
+            smooth_annotate_image_name = (
+                image_name[9:11] + ":" + image_name[11:13] + ":" + image_name[13:15]
+            )
+        except Exception:
+            smooth_annotate_image_name = image_name
+        print("x max:", smooth_annotate_image_name, np.nanmax(x_rad_out))
+        print("y max:", smooth_annotate_image_name, np.nanmax(y_rad_out))
 
-    # 1. Get LOS distances from polarization ratio
+    # --------------------------------------------------------------
+    # 5) Plot the triple mosaic
+    # --------------------------------------------------------------
+    minxy, maxxy = _get_minmax_fov(data_type, dist_image_plane_km)
 
-    out = core.radial_position_ps(tB, pB, dist_image_plane, dist_obs_to_source)
+    y_out_array = np.array(y_rad_out, copy=True)
+    x_out_array = np.array(x_rad_out, copy=True)
 
-    if len(out) == 4:
-        r_plus_km, r_minus_km, l_plus_km, l_minus_km = out
-    else:
-        (r_plus_km,
-         r_minus_km,
-         l_plus_km,
-         l_minus_km,
-         tau_plus,
-         tau_minus,
-         x_plus,
-         x_minus) = out
+    # Replace NaNs in side profiles with zero (for plotting only)
+    x_out_array = np.nan_to_num(x_out_array, nan=0.0)
+    y_out_array = np.nan_to_num(y_out_array, nan=0.0)
 
-    l_plus_km = np.asarray(l_plus_km, dtype=float)
-    l_minus_km = np.asarray(l_minus_km, dtype=float)
+    #y_out_array[y_out_array < 0.1] = np.nan
+    #x_out_array[x_out_array < 0.1] = np.nan
 
-    if solution == "plus":
-        l_use_km = l_plus_km
-    elif solution == "minus":
-        l_use_km = l_minus_km
-    else:
-        raise ValueError("solution must be 'plus' or 'minus'")
+    yvalues = np.flip(y_out_array, axis=0)
+    n = x_out_array.size
+    xvalues = np.linspace(minxy, maxxy, n)
+    
+    # this accounts for the origin being 'lower' in the central image
+    yvalues = np.flip(yvalues, axis=0)
+    #print(yvalues)
 
-
-    # 2. Build a LOS "depth" map in solar radii
-    #    rad_out = R_obs - l_use (in R_sun)
-
-    sun_obs_dist_rs = dist_obs_to_source / R_SUN_KM  # observer distance in R_sun
-
-    l_use_rs = l_use_km / R_SUN_KM
-    rad_out = sun_obs_dist_rs - l_use_rs  # in R_sun
-
-    # Clean obvious garbage
-    bad_mask = (
-        ~np.isfinite(rad_out)
-        | (rad_out < 0)
-        | (rad_out > sun_obs_dist_rs * 2.0)
-    )
-    rad_out[bad_mask] = np.nan
-
-    # Determine plotting upper limit
-    if artificial_max is None:
-        finite_vals = rad_out[np.isfinite(rad_out)]
-        if finite_vals.size > 0:
-            artificial_max = float(np.nanpercentile(finite_vals, 95))
-        else:
-            artificial_max = 10.0  # fallback
-    rad_out[rad_out > artificial_max] = np.nan
-
-    # Keep a copy before smoothing for the image
-    rad_out_orig = rad_out.copy()
-
-    # 3. Smooth the LOS map
-    sigma = [1.5, 1.5]  # (sigma_y, sigma_x)
-    rad_out_smooth = gaussian_filter(rad_out, sigma=sigma, mode="constant")
-
-    # 4. Extract slices with _make_triple_plot_data
-    y_profile, x_profile, y_counts, x_counts = _make_triple_plot_data(
-        rad_out_smooth,
-        aggregator="max",
-        minvalue=0.0,
-        maxvalue=artificial_max,
-    )
-
-    # Smooth 1D profiles with Savitzky–Golay filter
-    window_size = 35
-    poly_order = 3
-
-    # Ensure window_size is valid for x_profile
-    if window_size >= len(x_profile):
-        window_size = max(3, (len(x_profile) // 2) * 2 + 1)
-    x_profile_smooth = savgol_filter(x_profile, window_size, poly_order, mode="interp")
-
-    # Ensure window_size is valid for y_profile
-    if window_size >= len(y_profile):
-        window_size = max(3, (len(y_profile) // 2) * 2 + 1)
-    y_profile_smooth = savgol_filter(y_profile, window_size, poly_order, mode="interp")
-
-    # Mask tiny values (mostly background)
-    x_out_array = x_profile_smooth[::-1].copy()
-    y_out_array = y_profile_smooth.copy()
-    x_out_array[x_out_array < 0.1] = np.nan
-    y_out_array[y_out_array < 0.1] = np.nan
-
-    # 5. Determine POS extent from dist_image_plane (in R_sun)
-    rpos_rs = dist_image_plane / R_SUN_KM
-    rpos_max = float(np.nanmax(rpos_rs))
-    margin = 0.05 * rpos_max
-    minxy = -(rpos_max + margin)
-    maxxy = +(rpos_max + margin)
-
-    # X-axis (horizontal POS) for x-profile
-    xvalues = np.linspace(minxy, maxxy, x_out_array.size)
-    # Y-axis (vertical POS) for y-profile; flip so top of array is top of plot
-    #yvalues = np.flip(y_out_array, axis=0)
-    yvalues = y_out_array
-    ypos = np.linspace(minxy, maxxy, yvalues.size)
-
-
-    # 6. Triple plot: image + horizontal + vertical slices
-
-    fig = plt.figure(constrained_layout=True, figsize=(7.0, 6))
+    fig = plt.figure(constrained_layout=True, figsize=(7.0, 6.0))
     axd = fig.subplot_mosaic(
-        [["plotx", "."],
-         ["image", "ploty"]],
-        gridspec_kw={
-            "width_ratios": [6, 1.3],
-            "height_ratios": [1.3, 6],
-        },
+        [["plotx", "corner"], ["image", "ploty"]],
+        gridspec_kw={"width_ratios": [6, 1.3], "height_ratios": [1.3, 6]},
     )
 
-    # Main image: LOS depth map in R_sun
+
+    #axd["plotx"].set_xlim(minxy, maxxy)
+    #axd["ploty"].set_ylim(minxy, maxxy)
+
+#TODO: write to fits file or .npz
     im = axd["image"].imshow(
         rad_out_orig,
         extent=[minxy, maxxy, minxy, maxxy],
-        vmin=0.0,
-        vmax=artificial_max,
-        cmap="gray",   # dark near Sun, bright near observer
-        origin="lower",
+        vmax=plot_max,
+        vmin=plot_min,
         aspect="auto",
+        cmap=None if color_map == "no_color" else color_map,
+        origin="lower",
     )
+
+    axd["plotx"].sharex(axd["image"])
+    axd["ploty"].sharey(axd["image"])
 
     axd["image"].yaxis.set_label_position("left")
     axd["image"].yaxis.tick_left()
-    axd["image"].set_ylabel("POS / R$_\\odot$")
-    axd["image"].set_xlabel("POS / R$_\\odot$")
+    axd["image"].set_ylabel("Solar Y (R$_\\odot$)")
+    axd["image"].set_xlabel("Solar X (R$_\\odot$)")
 
-    fig.colorbar(
-        im,
-        orientation="vertical",
-        ax=axd["image"],
-        label=f"LOS (R$_\\odot$), {solution} solution",
-        location="left",
-    )
+    if show_time:
+        try:
+            annotate_image_name = f"{image_name[0:4]}-{image_name[4:6]}-{image_name[6:8]}"
+            annotate_image_name_2 = f"{image_name[9:11]}:{image_name[11:13]}:{image_name[13:15]} UT"
+        except Exception:
+            annotate_image_name = image_name
+            annotate_image_name_2 = ""
+        axd["image"].annotate(annotate_image_name, xy=(0, 0), xytext=(maxxy - 6.3, minxy + 2))
+        if annotate_image_name_2:
+            axd["image"].annotate(
+                annotate_image_name_2, xy=(0, 0), xytext=(maxxy - 6.2, minxy + 0.8), fontsize=8
+            )
 
-    # Top plot: horizontal LOS profile vs POS x
-    axd["plotx"].plot(xvalues, x_out_array, linewidth=1.0, color="black")
+    fig.colorbar(im, orientation="vertical", ax=axd["image"], label=cb_label, location="left")
+
+    # Top panel
+    if color_map == "no_color":
+        axd["plotx"].plot(xvalues, x_out_array, linewidth=1.0, color="black")
+    else:
+        cmap = plt.cm.get_cmap(color_map)
+        for i in range(0, n - 1):
+            axd["plotx"].plot(
+                xvalues[i:i + 2],
+                x_out_array[i:i + 2],
+                color=cmap(x_out_array[i] / plot_max) if np.isfinite(x_out_array[i]) else "black",
+            )
+
     axd["plotx"].get_xaxis().set_visible(False)
     axd["plotx"].yaxis.set_label_position("left")
     axd["plotx"].yaxis.tick_left()
-    axd["plotx"].set_ylabel("LOS (R$_\\odot$)")
-    axd["plotx"].set_ylim([0.0, artificial_max])
-    axd["plotx"].set_yticks([0.0, artificial_max / 2.0, artificial_max])
+    axd["plotx"].set_ylabel(side_label)
+    axd["plotx"].set_yticks([plot_min, plot_min + 0.5 * (plot_max - plot_min), plot_max])
+    axd["plotx"].set_ylim([plot_min, plot_max])
+    #axd["plotx"].set_xlim([np.nanmin(xvalues), np.nanmax(xvalues)])
+    axd["plotx"].set_xlim([minxy, maxxy])
 
-    # Right plot: vertical LOS profile vs POS y
-    axd["ploty"].plot(yvalues, ypos, linewidth=1.0, color="black")
+    # Right panel
+    if color_map == "no_color":
+        axd["ploty"].plot(yvalues, xvalues, linewidth=1.0, color="black")
+    else:
+        cmap = plt.cm.get_cmap(color_map)
+        for i in range(0, n - 1):
+            axd["ploty"].plot(
+                yvalues[i:i + 2],
+                xvalues[i:i + 2],
+                color=cmap(yvalues[i] / plot_max) if np.isfinite(yvalues[i]) else "black",
+            )
+
+
+
+
+    # Right panel
     axd["ploty"].get_yaxis().set_visible(False)
-    axd["ploty"].set_xlabel("LOS (R$_\\odot$)")
-    axd["ploty"].set_xlim([0.0, artificial_max])
-    axd["ploty"].set_xticks([0.0, artificial_max / 2.0, artificial_max])
+    axd["ploty"].set_xlabel(side_label)
 
-    plt.suptitle(f"Polarization-ratio LOS ({solution} solution)")
+    # y-axis in ploty is the position axis (xvalues), so match the image extent
+    axd["ploty"].set_ylim([minxy, maxxy])
+
+    # x-axis in ploty is the profile value axis (yvalues), so match plot_min/plot_max
+    axd["ploty"].set_xlim([plot_min, plot_max])
+    axd["ploty"].set_xticks([plot_min, plot_min + 0.5 * (plot_max - plot_min), plot_max])
+
+
+    # Corner logo
+    if include_name:
+        try:
+            py_file_path = os.path.dirname(__file__)
+            img = mpimg.imread(os.path.join(py_file_path, "images", "VAPOR.png"))
+            axd["corner"].imshow(img)
+            axd["corner"].get_xaxis().set_visible(False)
+            axd["corner"].get_yaxis().set_visible(False)
+            axd["corner"].axis("off")
+        except Exception:
+            axd["corner"].set_visible(False)
+    else:
+        axd["corner"].set_visible(False)
+
     plt.savefig(image_name, dpi=300)
     plt.close(fig)
 
-
-
-
-
-def plot_depth_map(D, title="LOS depth (Sun dark, observer bright)"):
-    """
-    Plot a depth map D (0–1) with a dark-to-bright grayscale.
-    """
-    fig, ax = plt.subplots(figsize=(6, 6))
-    im = ax.imshow(D, origin="lower", cmap="gray", vmin=0.0, vmax=1.0)
-    cbar = plt.colorbar(im, ax=ax, label="Normalized depth")
-    ax.set_title(title)
-    ax.set_xlabel("X pixel")
-    ax.set_ylabel("Y pixel")
-    plt.tight_layout()
-    return fig, ax
-
-
-
+    return rad_out_orig, morph_mask, minxy, maxxy

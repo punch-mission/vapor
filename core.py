@@ -1,166 +1,140 @@
-import warnings
 import numpy as np
+import astropy.units as u
 
-def radial_position_ps(tB, pB, dist_image_plane, dist_obs_to_source):
+from pathlib import Path
+from typing import Optional, Tuple, Union
+from astropy.constants import au
+from support import import_data, create_distance_map, build_mask
+from pathlib import Path
+from typing import Optional, Union
+from astropy.constants import au
+
+_ALLOWED_KEYS = {
+    "r_front", "r_back",
+    "l_front", "l_back",
+    "x_front", "x_back",
+    "s_front", "s_back",
+    "tau_front", "tau_back",
+    "PR",
+    "epsilon_map",
+    "d_map",
+}
+
+def radial_position_ps(
+    tb_path: Union[str, Path],
+    pb_path: Union[str, Path],
+    *,
+    return_key: str = "r_front",
+    data_type: Optional[str] = None,
+    use_mask: bool = True,
+    use_cdelt: bool = False,
+    subtract_base_image: bool = False,
+    base_tb_path: Optional[Union[str, Path]] = None,
+    base_pb_path: Optional[Union[str, Path]] = None,
+    dist_obs_to_source_km: float = au.to_value(u.km),
+) -> np.ndarray:
     """
-    Polarization-ratio line-of-sight localization (point-source approximation).
+    TS-based PR localization that returns ONLY one requested output map.
 
-    This routine takes total and polarized brightness in each image pixel and,
-    under the point-source approximation for the Sun, inverts the polarization
-    ratio to recover where along the line of sight the scattering feature could
-    be located.
-
-    There are two geometric solutions for each pixel:
-
-    - The **foreground** (+) solution: feature between the Sun and the observer.
-    - The **background** (–) solution: feature on the far side of the Sun,
-      behind the plane of the sky, but still along the same line of sight.
-
-    Distances and angles are defined as follows:
-
-    - `r_plus`, `r_minus`  (Sun → feature):
-        Heliocentric radial distance of the scattering point from the **Sun**
-        for the foreground (+) and background (–) solutions.
-
-    - `l_plus`, `l_minus`  (observer → feature):
-        Line-of-sight distance from the **observer** to the scattering point
-        along the ray corresponding to each pixel, for the + and – solutions.
-        `l = 0` at the observer; `l ≈ dist_obs_to_source` near the Sun.
-
-    - `tau_plus`, `tau_minus`  (angle along the LOS from the Thomson surface):
-        LOS angle measured from the Thomson surface (where the scattering angle
-        χ = 90°) toward the feature:
-            * τ > 0 : in front of the Thomson surface (towards the observer),
-            * τ < 0 : behind the Thomson surface (away from the observer).
-
-    - `x_plus`, `x_minus`  (distance from the plane of the sky):
-        Signed distance of the scattering point from the **plane of the sky**
-        (POS) along the Sun–observer axis:
-            * x = 0   : point lies in the POS,
-            * x > 0   : point in front of the POS (towards the observer),
-            * x < 0   : point behind the POS (far side of the Sun).
-
-    All distance outputs (`r_*`, `l_*`, `x_*`) are returned in the same units
-    as `dist_image_plane` and `dist_obs_to_source` (e.g. km or R_sun). Angles
-    (`epsilon`, `chi_*`, `xi_*`, `tau_*`) are in radians.
-
-    Parameters
-    ----------
-    tB : array_like
-        Total white-light brightness B for each pixel.
-    pB : array_like
-        Polarized brightness pB for each pixel (same shape as tB).
-    dist_image_plane : array_like
-        Projected distance from Sun centre in the image plane for each pixel
-        (impact parameter r_pos, same shape as tB), in the same units as
-        `dist_obs_to_source` (e.g. km or R_sun).
-    dist_obs_to_source : float
-        Distance from observer to the Sun (e.g. 1 AU in km, or ~215 R_sun).
-
-    Returns
-    -------
-    r_plus, r_minus : ndarray
-        Heliocentric radial distance from the Sun to the scattering point for
-        the foreground (+) and background (–) solutions.
-    l_plus, l_minus : ndarray
-        Line-of-sight distance from the observer to the scattering point for
-        the foreground (+) and background (–) solutions.
-    tau_plus, tau_minus : ndarray
-        LOS angles (in radians) from the Thomson surface for the + and –
-        solutions.
-    x_plus, x_minus : ndarray
-        Signed distance from the plane of the sky along the Sun–observer axis
-        for the + and – solutions.
-
-    Notes
-    -----
-    - Inputs and outputs must be in consistent length units (km with km, or
-      R_sun with R_sun).
-    - Pixels with unphysical polarization (p < 0 or p > 1) or numerically
-      invalid PR are returned as NaN in all outputs.
+    Valid return_key values:
+      r_front, r_back, l_front, l_back, x_front, x_back,
+      s_front, s_back, tau_front, tau_back, PR, epsilon_map, d_map
     """
+    if return_key not in _ALLOWED_KEYS:
+        raise ValueError(f"return_key must be one of {sorted(_ALLOWED_KEYS)}; got '{return_key}'")
 
-    # Cast and check shapes
-    tB   = np.asarray(tB, dtype=float)
-    pB   = np.asarray(pB, dtype=float)
-    rpos = np.asarray(dist_image_plane, dtype=float)
+    tb_path = Path(tb_path)
+    pb_path = Path(pb_path)
+    r_obs = float(dist_obs_to_source_km)
 
-    if tB.shape != pB.shape or tB.shape != rpos.shape:
-        raise ValueError("tB, pB, and dist_image_plane must have the same shape")
+    # ---- Load images WITHOUT internal masking; apply one shared mask if requested ----
+    tB, _ = import_data(
+        tb_path,
+        data_type=data_type,
+        use_mask=False,
+        use_cdelt=use_cdelt,
+        subtract_base_image=subtract_base_image,
+        base_file_path=base_tb_path,
+    )
+    pB, _ = import_data(
+        pb_path,
+        data_type=data_type,
+        use_mask=False,
+        use_cdelt=use_cdelt,
+        subtract_base_image=subtract_base_image,
+        base_file_path=base_pb_path,
+    )
 
-    # Elongation epsilon = arctan(r_pos / R_obs)
-    epsilon = np.arctan2(rpos, dist_obs_to_source)
+    tB = np.asarray(tB, dtype=float)
+    pB = np.asarray(pB, dtype=float)
 
-    # Fractional polarization p = pB / B
-    pol = np.zeros_like(tB, dtype=float)
-    valid = (tB > 0) & np.isfinite(tB) & np.isfinite(pB)
-    pol[valid] = pB[valid] / tB[valid]
+    if tB.shape != pB.shape:
+        raise ValueError("tB and pB must have the same shape")
 
-    # Require 0 <= p <= 1 and mark others invalid
-    valid &= (pol >= 0.0) & (pol <= 1.0)
+    if use_mask:
+        mask = build_mask(str(pb_path))
+        if mask.shape != tB.shape:
+            raise ValueError("Mask shape does not match image shape.")
+        tB = tB * mask
+        pB = pB * mask
 
-    # Polarization ratio PR = (1 - p) / (1 + p)
+    # ---- Geometry ----
+    rpos_map = create_distance_map(pb_path, data_type=data_type, use_cdelt=use_cdelt)  # km
+    epsilon_map = np.arctan2(rpos_map, r_obs)  # rad
+    d_map = r_obs * np.sin(epsilon_map)        # km
+
+    # ---- PR (Eq 13) ----
+    denom = (tB + pB)
+    good = np.isfinite(tB) & np.isfinite(pB) & np.isfinite(denom) & (denom != 0.0)
+
     PR = np.full_like(tB, np.nan, dtype=float)
-    PR[valid] = (1.0 - pol[valid]) / (1.0 + pol[valid])
+    PR[good] = (tB[good] - pB[good]) / denom[good]
+    PR = np.clip(PR, 0.0, 1.0)
 
-    # Guard against numerical overshoots
-    valid &= (PR >= 0.0) & (PR <= 1.0)
-    PR[~valid] = np.nan
+    # ---- tau solutions ----
+    tau_front =  np.arcsin(np.sqrt(PR))
+    tau_back  = -np.arcsin(np.sqrt(PR))
 
-    # Scattering angle chi from PR (point-source: PR = sin^2 chi)
-    chi_plus  = np.full_like(tB, np.nan, dtype=float)
-    chi_plus[valid] = np.arccos(np.sqrt(PR[valid]))
-    chi_minus = np.pi - chi_plus
+    # ---- s solutions (from TS) ----
+    s_front = d_map * np.tan(tau_front)
+    s_back  = d_map * np.tan(tau_back)
 
-    # Angle xi between Sun–feature and observer–feature rays
-    xi_plus  = epsilon - chi_plus  + 0.5 * np.pi
-    xi_minus = epsilon - chi_minus + 0.5 * np.pi
+    # ---- LOS distance observer→feature ----
+    l_front = r_obs * np.cos(epsilon_map) - s_front
+    l_back  = r_obs * np.cos(epsilon_map) - s_back
 
-    # LOS distances (observer → feature)
-    l_plus  = np.full_like(tB, np.nan, dtype=float)
-    l_minus = np.full_like(tB, np.nan, dtype=float)
+    # ---- distance from POS ----
+    x_front = d_map * np.sin(epsilon_map) + s_front * np.cos(epsilon_map)
+    x_back  = d_map * np.sin(epsilon_map) + s_back  * np.cos(epsilon_map)
 
-    denom_plus  = np.sin(np.pi - chi_plus)   # = sin(chi_plus)
-    denom_minus = np.sin(np.pi - chi_minus)  # = sin(chi_minus)
+    # ---- heliocentric distance Sun→feature ----
+    r_front = np.hypot(d_map, s_front)
+    r_back  = np.hypot(d_map, s_back)
 
-    good_plus  = valid & (denom_plus  != 0)
-    good_minus = valid & (denom_minus != 0)
+    # ---- Ensure invalid pixels are NaN everywhere (including derived products) ----
+    invalid = ~good
+    for arr in (tau_front, tau_back, s_front, s_back, l_front, l_back, x_front, x_back, r_front, r_back):
+        arr[invalid] = np.nan
 
-    l_plus[good_plus] = (
-        dist_obs_to_source
-        * np.sin(0.5 * np.pi - xi_plus[good_plus])
-        / denom_plus[good_plus]
-    )
-    l_minus[good_minus] = (
-        dist_obs_to_source
-        * np.sin(0.5 * np.pi - xi_minus[good_minus])
-        / denom_minus[good_minus]
-    )
+    # ---- Return only what was requested ----
+    outputs = {
+        "r_front": r_front,
+        "r_back": r_back,
+        "l_front": l_front,
+        "l_back": l_back,
+        "x_front": x_front,
+        "x_back": x_back,
+        "s_front": s_front,
+        "s_back": s_back,
+        "tau_front": tau_front,
+        "tau_back": tau_back,
+        "PR": PR,
+        "epsilon_map": epsilon_map,
+        "d_map": d_map,
+    }
 
-    # Radial distances (Sun → feature)
-    r_plus  = np.full_like(tB, np.nan, dtype=float)
-    r_minus = np.full_like(tB, np.nan, dtype=float)
+    return outputs[return_key]
 
-    r_plus[good_plus] = (
-        dist_obs_to_source
-        * np.sin(epsilon[good_plus])
-        / denom_plus[good_plus]
-    )
-    r_minus[good_minus] = (
-        dist_obs_to_source
-        * np.sin(epsilon[good_minus])
-        / denom_minus[good_minus]
-    )
 
-    # LOS angle from TS: tau = xi - epsilon
-    tau_plus  = xi_plus  - epsilon
-    tau_minus = xi_minus - epsilon
-
-    # Distance from plane of sky along Sun–observer axis: x = r sin(xi)
-    x_plus  = np.full_like(tB, np.nan, dtype=float)
-    x_minus = np.full_like(tB, np.nan, dtype=float)
-
-    x_plus[good_plus]  = r_plus[good_plus]  * np.sin(xi_plus[good_plus])
-    x_minus[good_minus] = r_minus[good_minus] * np.sin(xi_minus[good_minus])
-
-    return r_plus, r_minus, l_plus, l_minus, tau_plus, tau_minus, x_plus, x_minus
+def radial_position_scatter():
+    return None
