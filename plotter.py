@@ -503,8 +503,8 @@ def create_triple_stereo_plot(
 
     axd["image"].yaxis.set_label_position("left")
     axd["image"].yaxis.tick_left()
-    axd["image"].set_ylabel("(R$_\\odot$)")
-    axd["image"].set_xlabel("(R$_\\odot$)")
+    axd["image"].set_ylabel("Solar Y (R$_\\odot$)")
+    axd["image"].set_xlabel("Solar X (R$_\\odot$)")
 
     if show_time:
         try:
